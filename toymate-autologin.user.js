@@ -976,9 +976,13 @@
     
     const minDelay = GM_getValue(STORAGE_POLL_MIN, 3) * 1000;
     const maxDelay = GM_getValue(STORAGE_POLL_MAX, 6) * 1000;
+    
+    logActivity(`Starting background stock poll (Delay: ${minDelay/1000}s - ${maxDelay/1000}s)...`, 'info');
 
     const scheduleNextPoll = () => {
       const delay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+      const delaySec = (delay / 1000).toFixed(1);
+      setStatus('warn', 'Polling', `Next check in ${delaySec}s...`, true);
       stockPollTimeout = setTimeout(doPoll, delay);
     };
 
@@ -992,6 +996,7 @@
       if (pollCount % 5 === 0) {
         logActivity(`Still polling stock... (check #${pollCount}) — ${cleanUrl}`, 'warn');
       }
+      setStatus('info', 'Checking', `Polling stock now...`, true);
 
       GM_xmlhttpRequest({
         method: 'GET',
@@ -1104,8 +1109,8 @@
       // No Add to Cart button visible — product might be out of stock right now.
       // Use background fetch to poll stock silently instead of page refreshing.
       const targetUrl = GM_getValue(STORAGE_TARGET_URL, '') || window.location.href;
-      logActivity('Add to Cart not found. Polling stock silently via fetch...', 'warn');
-      setStatus('warn', 'Waiting', 'Polling stock (no refresh)...', true);
+      logActivity('Add to Cart not found. Initializing silent background fetch...', 'warn');
+      setStatus('warn', 'Waiting', 'Initializing poll...', true);
       checkStockInBackground(targetUrl, () => {
         // Callback fires when stock detected — navigate to the product page
         logActivity('Stock detected via fetch! Navigating to product page to buy...', 'success');
