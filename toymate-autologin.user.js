@@ -392,6 +392,8 @@
         
         <div class="tm-tabs" id="tm-tabs">
           <div class="tm-tab active" data-target="tm-sec-auth">Auth</div>
+          <div class="tm-tab" data-target="tm-sec-pay">Pay</div>
+          <div class="tm-tab" data-target="tm-sec-bot">Config</div>
           <div class="tm-tab" data-target="tm-sec-product">Product</div>
         </div>
 
@@ -436,8 +438,49 @@
             </label>
           </div>
           <div class="tm-btn-row">
-            <button class="tm-btn tm-btn-secondary" id="tm-save-btn">${ICON_SAVE}&nbsp;Save</button>
-            <button class="tm-btn tm-btn-primary" id="tm-login-btn">${ICON_KEY}&nbsp;Login Now</button>
+            <button class="tm-btn tm-btn-primary" id="tm-login-btn" style="flex:1;">${ICON_KEY}&nbsp;Login Now</button>
+          </div>
+        </div>
+
+        <!-- PAYMENT SECTION -->
+        <div class="tm-section" id="tm-sec-pay">
+          <div class="tm-field">
+            <div class="tm-label">Credit Card Number</div>
+            <div class="tm-input-wrap">
+              <span class="tm-input-icon">${ICON_CART}</span>
+              <input type="text" id="tm-cc-num" placeholder="1234 5678 1234 5678" value="${escAttr(savedCcNum)}" />
+            </div>
+          </div>
+          <div style="display: flex; gap: 10px; margin-top: 10px;">
+            <div class="tm-field" style="flex: 1;">
+              <div class="tm-label">Expiry (MM/YY)</div>
+              <input type="text" id="tm-cc-exp" placeholder="MM/YY" value="${escAttr(savedCcExp)}" style="width: 100%; box-sizing: border-box; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); color: #fff; border-radius: 12px; padding: 10px 14px; font-family: inherit; font-size: 13.5px; outline: none;" />
+            </div>
+            <div class="tm-field" style="flex: 1;">
+              <div class="tm-label">CVV</div>
+              <input type="text" id="tm-cc-cvv" placeholder="123" value="${escAttr(savedCcCvv)}" style="width: 100%; box-sizing: border-box; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); color: #fff; border-radius: 12px; padding: 10px 14px; font-family: inherit; font-size: 13.5px; outline: none;" />
+            </div>
+          </div>
+        </div>
+
+        <!-- BOT CONFIG SECTION -->
+        <div class="tm-section" id="tm-sec-bot">
+          <div class="tm-field">
+            <div class="tm-label">🎯 Target URL <span style="opacity:.5;font-size:11px;">(stock poll)</span></div>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <input type="text" id="tm-target-url" placeholder="https://toymate.com.au/product-slug/" value="${escAttr(savedTargetUrl)}" style="flex:1;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:12px;padding:10px 14px;font-family:inherit;font-size:12.5px;outline:none;" />
+              <button id="tm-clear-url-btn" title="Use current page URL" style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:10px;padding:9px 12px;cursor:pointer;font-size:12px;white-space:nowrap;">📍 This page</button>
+            </div>
+          </div>
+          <div style="display: flex; gap: 10px; margin-top: 12px;">
+            <div class="tm-field" style="flex: 1;">
+              <div class="tm-label">Min Delay (s)</div>
+              <input type="number" id="tm-poll-min" placeholder="3" value="${savedPollMin}" min="1" style="width: 100%; box-sizing: border-box; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); color: #fff; border-radius: 12px; padding: 10px 14px; font-family: inherit; font-size: 13.5px; outline: none;" />
+            </div>
+            <div class="tm-field" style="flex: 1;">
+              <div class="tm-label">Max Delay (s)</div>
+              <input type="number" id="tm-poll-max" placeholder="6" value="${savedPollMax}" min="1" style="width: 100%; box-sizing: border-box; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); color: #fff; border-radius: 12px; padding: 10px 14px; font-family: inherit; font-size: 13.5px; outline: none;" />
+            </div>
           </div>
         </div>
 
@@ -455,49 +498,16 @@
       <div class="tm-activity-log" id="tm-activity-log">
         <div class="tm-log-item info"><span class="tm-log-time">[${new Date().toLocaleTimeString('en-US', { hour12: false })}]</span><span class="tm-log-msg">Bot initialized. UI ready.</span></div>
       </div>
+
+      <!-- Global Actions -->
       <div class="tm-global-actions" style="padding: 0 20px 16px;">
+        <div class="tm-btn-row" style="margin-bottom: 12px;">
+          <button class="tm-btn tm-btn-secondary" id="tm-save-btn" style="flex:1;">${ICON_SAVE}&nbsp;Save All Settings</button>
+        </div>
         <div class="tm-qty-wrap" style="margin-top:0;">
           <input type="number" id="tm-qty-input" value="1" min="1" title="Target Quantity" />
           <button class="tm-btn-cart" id="tm-start-bot-btn">${ICON_CART} Start Bot</button>
           <button class="tm-btn-stop" id="tm-stop-bot-btn" style="display:none;">${ICON_STOP} Stop Bot</button>
-        </div>
-        
-        <div class="tm-form-group" style="margin-top: 10px;">
-          <label class="tm-label">Credit Card Number</label>
-          <div class="tm-input-wrapper">
-            <span class="tm-input-icon">${ICON_CART}</span>
-            <input type="text" id="tm-cc-num" placeholder="1234 5678 1234 5678" value="${escAttr(savedCcNum)}" />
-          </div>
-        </div>
-        
-        <div style="display: flex; gap: 10px; margin-top: 10px;">
-          <div class="tm-form-group" style="flex: 1;">
-            <label class="tm-label">Expiry (MM/YY)</label>
-            <input type="text" id="tm-cc-exp" placeholder="MM/YY" value="${escAttr(savedCcExp)}" style="width: 100%; box-sizing: border-box; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); color: #fff; border-radius: 12px; padding: 12px 14px; font-family: inherit; font-size: 13.5px; outline: none;" />
-          </div>
-          <div class="tm-form-group" style="flex: 1;">
-            <label class="tm-label">Security Code (CVV)</label>
-            <input type="text" id="tm-cc-cvv" placeholder="123" value="${escAttr(savedCcCvv)}" style="width: 100%; box-sizing: border-box; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); color: #fff; border-radius: 12px; padding: 12px 14px; font-family: inherit; font-size: 13.5px; outline: none;" />
-          </div>
-        </div>
-
-        <div class="tm-form-group" style="margin-top: 12px;">
-          <label class="tm-label">🎯 Target Product URL <span style="opacity:.5;font-size:11px;">(for background stock poll)</span></label>
-          <div style="display:flex;gap:6px;align-items:center;">
-            <input type="text" id="tm-target-url" placeholder="https://toymate.com.au/product-slug/" value="${escAttr(savedTargetUrl)}" style="flex:1;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:12px;padding:10px 14px;font-family:inherit;font-size:12.5px;outline:none;" />
-            <button id="tm-clear-url-btn" title="Use current page URL" style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:10px;padding:9px 12px;cursor:pointer;font-size:12px;white-space:nowrap;">📍 This page</button>
-          </div>
-        </div>
-
-        <div style="display: flex; gap: 10px; margin-top: 12px;">
-          <div class="tm-form-group" style="flex: 1;">
-            <label class="tm-label">Min Poll Delay (s)</label>
-            <input type="number" id="tm-poll-min" placeholder="3" value="${savedPollMin}" min="1" style="width: 100%; box-sizing: border-box; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); color: #fff; border-radius: 12px; padding: 10px 14px; font-family: inherit; font-size: 13.5px; outline: none;" />
-          </div>
-          <div class="tm-form-group" style="flex: 1;">
-            <label class="tm-label">Max Poll Delay (s)</label>
-            <input type="number" id="tm-poll-max" placeholder="6" value="${savedPollMax}" min="1" style="width: 100%; box-sizing: border-box; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); color: #fff; border-radius: 12px; padding: 10px 14px; font-family: inherit; font-size: 13.5px; outline: none;" />
-          </div>
         </div>
       </div>
       <div class="tm-footer" style="padding-top:0;">🔒 Credentials stored locally · never transmitted</div>
@@ -905,10 +915,12 @@
 
       GM_xmlhttpRequest({
         method: 'GET',
-        url: cleanUrl,
+        url: cleanUrl + "?_t=" + Date.now(), // Cache-busting timestamp
         headers: {
           'Accept': 'text/html',
-          'Cache-Control': 'no-cache',
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
+          'Expires': '0'
         },
         onload: function(res) {
           if (!botRunning && !GM_getValue(STORAGE_AUTO, false)) {
