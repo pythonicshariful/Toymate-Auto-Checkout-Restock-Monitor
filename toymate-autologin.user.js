@@ -391,25 +391,27 @@
       <div class="tm-body">
         
         <div class="tm-tabs" id="tm-tabs">
-          <div class="tm-tab active" data-target="tm-sec-auth">Auth</div>
-          <div class="tm-tab" data-target="tm-sec-pay">Pay</div>
-          <div class="tm-tab" data-target="tm-sec-bot">Config</div>
-          <div class="tm-tab" data-target="tm-sec-product">Product</div>
+          <div class="tm-tab active" data-target="tm-sec-auth">🔑 Login</div>
+          <div class="tm-tab" data-target="tm-sec-more">⚙️ More</div>
+          <div class="tm-tab" data-target="tm-sec-pay">💳 Pay</div>
+          <div class="tm-tab" data-target="tm-sec-bot">🎯 Config</div>
+          <div class="tm-tab" data-target="tm-sec-product">📦 Item</div>
         </div>
 
         <div id="tm-page-badge" class="tm-page-badge other">Page Detected</div>
 
-        <!-- AUTH SECTION -->
-        <div class="tm-section active" id="tm-sec-auth">
-          <div class="tm-status info" id="tm-status">
-            <div class="tm-status-dot"></div>
-            <div class="tm-status-text">
-              <div class="tm-status-title">Enter credentials and click Login</div>
-            </div>
+        <!-- STATUS (always visible) -->
+        <div class="tm-status info" id="tm-status" style="margin: 0 16px 6px;">
+          <div class="tm-status-dot"></div>
+          <div class="tm-status-text">
+            <div class="tm-status-title">Enter credentials and click Login</div>
           </div>
-          
+        </div>
+
+        <!-- LOGIN TAB -->
+        <div class="tm-section active" id="tm-sec-auth">
           <div class="tm-field">
-            <div class="tm-label">Email Address</div>
+            <div class="tm-label">Email</div>
             <div class="tm-input-wrap">
               <span class="tm-input-icon">${ICON_MAIL}</span>
               <input id="tm-email" type="email" placeholder="you@example.com" autocomplete="email" value="${escAttr(savedEmail)}" />
@@ -419,12 +421,19 @@
             <div class="tm-label">Password</div>
             <div class="tm-input-wrap">
               <span class="tm-input-icon">${ICON_LOCK}</span>
-              <input id="tm-pass" type="password" placeholder="••••••••••" autocomplete="current-password" value="${escAttr(savedPass)}" />
+              <input id="tm-pass" type="password" placeholder="••••••••" autocomplete="current-password" value="${escAttr(savedPass)}" />
               <button class="tm-eye-btn" id="tm-eye-btn" title="Toggle visibility">${ICON_EYE}</button>
             </div>
           </div>
+          <div class="tm-btn-row">
+            <button class="tm-btn tm-btn-primary" id="tm-login-btn" style="flex:1;">${ICON_KEY}&nbsp;Login Now</button>
+          </div>
+        </div>
+
+        <!-- MORE TAB (coupon + toggle) -->
+        <div class="tm-section" id="tm-sec-more">
           <div class="tm-field">
-            <div class="tm-label">Auto-Checkout Coupon (Optional)</div>
+            <div class="tm-label">Coupon Code (Optional)</div>
             <div class="tm-input-wrap">
               <span class="tm-input-icon">${ICON_CART}</span>
               <input id="tm-coupon" type="text" placeholder="e.g. TOYS10" value="${escAttr(savedCoupon)}" />
@@ -437,54 +446,51 @@
               <span class="tm-switch-slider"></span>
             </label>
           </div>
-          <div class="tm-btn-row">
-            <button class="tm-btn tm-btn-primary" id="tm-login-btn" style="flex:1;">${ICON_KEY}&nbsp;Login Now</button>
-          </div>
         </div>
 
-        <!-- PAYMENT SECTION -->
+        <!-- PAY TAB -->
         <div class="tm-section" id="tm-sec-pay">
           <div class="tm-field">
-            <div class="tm-label">Credit Card Number</div>
+            <div class="tm-label">Card Number</div>
             <div class="tm-input-wrap">
               <span class="tm-input-icon">${ICON_CART}</span>
               <input type="text" id="tm-cc-num" placeholder="1234 5678 1234 5678" value="${escAttr(savedCcNum)}" />
             </div>
           </div>
-          <div style="display: flex; gap: 10px; margin-top: 10px;">
-            <div class="tm-field" style="flex: 1;">
-              <div class="tm-label">Expiry (MM/YY)</div>
-              <input type="text" id="tm-cc-exp" placeholder="MM/YY" value="${escAttr(savedCcExp)}" style="width: 100%; box-sizing: border-box; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); color: #fff; border-radius: 12px; padding: 10px 14px; font-family: inherit; font-size: 13.5px; outline: none;" />
+          <div style="display:flex;gap:8px;">
+            <div class="tm-field" style="flex:1;">
+              <div class="tm-label">MM/YY</div>
+              <input type="text" id="tm-cc-exp" placeholder="MM/YY" value="${escAttr(savedCcExp)}" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:9px 12px;font-family:inherit;font-size:13px;outline:none;" />
             </div>
-            <div class="tm-field" style="flex: 1;">
+            <div class="tm-field" style="flex:1;">
               <div class="tm-label">CVV</div>
-              <input type="text" id="tm-cc-cvv" placeholder="123" value="${escAttr(savedCcCvv)}" style="width: 100%; box-sizing: border-box; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); color: #fff; border-radius: 12px; padding: 10px 14px; font-family: inherit; font-size: 13.5px; outline: none;" />
+              <input type="text" id="tm-cc-cvv" placeholder="123" value="${escAttr(savedCcCvv)}" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:9px 12px;font-family:inherit;font-size:13px;outline:none;" />
             </div>
           </div>
         </div>
 
-        <!-- BOT CONFIG SECTION -->
+        <!-- CONFIG TAB -->
         <div class="tm-section" id="tm-sec-bot">
           <div class="tm-field">
-            <div class="tm-label">🎯 Target URL <span style="opacity:.5;font-size:11px;">(stock poll)</span></div>
-            <div style="display:flex;gap:6px;align-items:center;">
-              <input type="text" id="tm-target-url" placeholder="https://toymate.com.au/product-slug/" value="${escAttr(savedTargetUrl)}" style="flex:1;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:12px;padding:10px 14px;font-family:inherit;font-size:12.5px;outline:none;" />
-              <button id="tm-clear-url-btn" title="Use current page URL" style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:10px;padding:9px 12px;cursor:pointer;font-size:12px;white-space:nowrap;">📍 This page</button>
+            <div class="tm-label">🎯 Target URL</div>
+            <div style="display:flex;gap:5px;align-items:center;">
+              <input type="text" id="tm-target-url" placeholder="https://toymate.com.au/..." value="${escAttr(savedTargetUrl)}" style="flex:1;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:10px;padding:8px 11px;font-family:inherit;font-size:11.5px;outline:none;" />
+              <button id="tm-clear-url-btn" style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:9px;padding:8px 10px;cursor:pointer;font-size:11px;white-space:nowrap;">📍 Here</button>
             </div>
           </div>
-          <div style="display: flex; gap: 10px; margin-top: 12px;">
-            <div class="tm-field" style="flex: 1;">
-              <div class="tm-label">Min Delay (s)</div>
-              <input type="number" id="tm-poll-min" placeholder="3" value="${savedPollMin}" min="1" style="width: 100%; box-sizing: border-box; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); color: #fff; border-radius: 12px; padding: 10px 14px; font-family: inherit; font-size: 13.5px; outline: none;" />
+          <div style="display:flex;gap:8px;margin-top:8px;">
+            <div class="tm-field" style="flex:1;">
+              <div class="tm-label">Min (s)</div>
+              <input type="number" id="tm-poll-min" value="${savedPollMin}" min="1" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:9px 12px;font-family:inherit;font-size:13px;outline:none;" />
             </div>
-            <div class="tm-field" style="flex: 1;">
-              <div class="tm-label">Max Delay (s)</div>
-              <input type="number" id="tm-poll-max" placeholder="6" value="${savedPollMax}" min="1" style="width: 100%; box-sizing: border-box; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); color: #fff; border-radius: 12px; padding: 10px 14px; font-family: inherit; font-size: 13.5px; outline: none;" />
+            <div class="tm-field" style="flex:1;">
+              <div class="tm-label">Max (s)</div>
+              <input type="number" id="tm-poll-max" value="${savedPollMax}" min="1" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:9px 12px;font-family:inherit;font-size:13px;outline:none;" />
             </div>
           </div>
         </div>
 
-        <!-- PRODUCT SECTION -->
+        <!-- PRODUCT TAB -->
         <div class="tm-section" id="tm-sec-product">
           <div id="tm-product-container">
             <div class="tm-empty-state">Waiting for a product page...</div>
@@ -493,24 +499,25 @@
 
       </div>
       <div class="tm-divider"></div>
-      
-      <!-- Activity Log (Global) -->
-      <div class="tm-activity-log" id="tm-activity-log">
+
+      <!-- Activity Log -->
+      <div class="tm-activity-log" id="tm-activity-log" style="max-height:60px;">
         <div class="tm-log-item info"><span class="tm-log-time">[${new Date().toLocaleTimeString('en-US', { hour12: false })}]</span><span class="tm-log-msg">Bot initialized. UI ready.</span></div>
       </div>
 
       <!-- Global Actions -->
-      <div class="tm-global-actions" style="padding: 0 20px 16px;">
-        <div class="tm-btn-row" style="margin-bottom: 12px;">
-          <button class="tm-btn tm-btn-secondary" id="tm-save-btn" style="flex:1;">${ICON_SAVE}&nbsp;Save All Settings</button>
+      <div class="tm-global-actions" style="padding:8px 16px 12px;">
+        <div class="tm-btn-row" style="margin-bottom:8px;gap:6px;">
+          <button class="tm-btn tm-btn-secondary" id="tm-save-btn" style="flex:1;padding:9px;font-size:12.5px;">${ICON_SAVE}&nbsp;Save</button>
+          <button class="tm-btn tm-btn-primary" id="tm-login-btn-2" onclick="document.getElementById('tm-login-btn').click()" style="flex:1;padding:9px;font-size:12.5px;">${ICON_KEY}&nbsp;Login</button>
         </div>
-        <div class="tm-qty-wrap" style="margin-top:0;">
-          <input type="number" id="tm-qty-input" value="1" min="1" title="Target Quantity" />
+        <div class="tm-qty-wrap" style="margin-top:0;gap:6px;">
+          <input type="number" id="tm-qty-input" value="1" min="1" title="Qty" style="width:52px;" />
           <button class="tm-btn-cart" id="tm-start-bot-btn">${ICON_CART} Start Bot</button>
-          <button class="tm-btn-stop" id="tm-stop-bot-btn" style="display:none;">${ICON_STOP} Stop Bot</button>
+          <button class="tm-btn-stop" id="tm-stop-bot-btn" style="display:none;">${ICON_STOP} Stop</button>
         </div>
       </div>
-      <div class="tm-footer" style="padding-top:0;">🔒 Credentials stored locally · never transmitted</div>
+      <div class="tm-footer" style="padding:4px 16px 10px;font-size:10px;">🔒 Stored locally · never transmitted</div>
     `;
     document.body.appendChild(panel);
 
