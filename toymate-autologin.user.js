@@ -486,7 +486,8 @@
             <div class="tm-label">🎯 Target URL</div>
             <div style="display:flex;gap:5px;align-items:center;">
               <input type="text" id="tm-target-url" placeholder="https://toymate.com.au/..." value="${escAttr(savedTargetUrl)}" style="flex:1;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:10px;padding:8px 11px;font-family:inherit;font-size:11.5px;outline:none;" />
-              <button id="tm-clear-url-btn" style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:9px;padding:8px 10px;cursor:pointer;font-size:11px;white-space:nowrap;">📍 Here</button>
+              <button id="tm-clear-url-btn" title="Set to current page" style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:9px;padding:8px 10px;cursor:pointer;font-size:11px;white-space:nowrap;">📍 Here</button>
+              <button id="tm-empty-url-btn" title="Clear URL" style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:9px;padding:8px 10px;cursor:pointer;font-size:11px;white-space:nowrap;">❌</button>
             </div>
           </div>
           <div style="display:flex;gap:8px;margin-top:8px;">
@@ -551,6 +552,12 @@
       urlInput.value = window.location.href.split('?')[0];
       GM_setValue(STORAGE_TARGET_URL, urlInput.value);
       showToast('Target URL set to current page!', 'success');
+    };
+    document.getElementById('tm-empty-url-btn').onclick = () => {
+      const urlInput = document.getElementById('tm-target-url');
+      urlInput.value = '';
+      GM_setValue(STORAGE_TARGET_URL, '');
+      showToast('Target URL cleared!', 'success');
     };
 
     document.querySelectorAll('.tm-tab').forEach(tab => {
