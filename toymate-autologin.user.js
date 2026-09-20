@@ -386,8 +386,8 @@
         <div class="tm-header-left">
           <div class="tm-logo">🧸</div>
           <div>
-            <div class="tm-title">Toymate Auto Login</div>
-            <div class="tm-subtitle">Credential Manager</div>
+            <div class="tm-title">Toymate Bot</div>
+            <div class="tm-subtitle">Auto Checkout & Restock</div>
           </div>
         </div>
         <button class="tm-close-btn" id="tm-close-btn" title="Hide panel">${ICON_CLOSE}</button>
@@ -586,7 +586,7 @@
     if (document.getElementById('tm-toggle-bubble')) return;
     const bubble = document.createElement('div');
     bubble.id = 'tm-toggle-bubble';
-    bubble.title = 'Toymate Auto Login';
+    bubble.title = 'Toymate Bot - Auto Checkout & Restock';
     bubble.innerHTML = mkSvg(
       '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
       22, 22
