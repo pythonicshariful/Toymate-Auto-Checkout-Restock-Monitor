@@ -1097,7 +1097,8 @@
     let currentQty = parseInt(qtyInputUI.value) || 1;
 
     const nativeQtyInput = document.querySelector('input[name="quantity"]');
-    const nativeAddBtn = Array.from(document.querySelectorAll('button[type="submit"]')).find(b => b.textContent.toLowerCase().includes('add to cart'));
+    const form = nativeQtyInput ? nativeQtyInput.closest('form') : null;
+    const nativeAddBtn = form ? Array.from(form.querySelectorAll('button[type="submit"]')).find(b => b.textContent.toLowerCase().includes('add to cart')) : null;
 
     if (!nativeQtyInput || !nativeAddBtn) {
       // No Add to Cart button visible — product might be out of stock right now.
@@ -1123,8 +1124,9 @@
       const cartBadge = document.querySelector('a[href="/cart/"] span');
       const initialCount = cartBadge ? parseInt(cartBadge.textContent) || 0 : 0;
 
-      // Re-query the Add to Cart button as typing may have caused React to re-render it
-      const freshAddBtn = Array.from(document.querySelectorAll('button[type="submit"]')).find(b => b.textContent.toLowerCase().includes('add to cart'));
+      // Re-query the Add to Cart button from the correct form as typing may have caused React to re-render it
+      const freshForm = document.querySelector('input[name="quantity"]')?.closest('form');
+      const freshAddBtn = freshForm ? Array.from(freshForm.querySelectorAll('button[type="submit"]')).find(b => b.textContent.toLowerCase().includes('add to cart')) : null;
 
       if (!freshAddBtn) {
         logActivity('Add to cart button disappeared after typing. Retrying...', 'error');
