@@ -32,6 +32,8 @@
   const STORAGE_TARGET_URL = 'tm_target_url';
   const STORAGE_POLL_MIN = 'tm_poll_min';
   const STORAGE_POLL_MAX = 'tm_poll_max';
+  const STORAGE_DISCORD_WEBHOOK = 'tm_discord_webhook';
+  const STORAGE_SOUND_ENABLED = 'tm_sound_enabled';
   const PANEL_ID = 'tm-autologin-panel';
 
   /* ─────────────────────────────────────────────
@@ -372,6 +374,8 @@
     const savedTargetUrl = GM_getValue(STORAGE_TARGET_URL, '');
     const savedPollMin = GM_getValue(STORAGE_POLL_MIN, 3);
     const savedPollMax = GM_getValue(STORAGE_POLL_MAX, 6);
+    const savedDiscordWebhook = GM_getValue(STORAGE_DISCORD_WEBHOOK, '');
+    const savedSoundEnabled = GM_getValue(STORAGE_SOUND_ENABLED, true);
     const autoEnabled = GM_getValue(STORAGE_AUTO, false);
 
     const panel = document.createElement('div');
@@ -446,6 +450,13 @@
               <span class="tm-switch-slider"></span>
             </label>
           </div>
+          <div class="tm-toggle-row">
+            <span class="tm-toggle-label">🔔&nbsp; Notification Sounds</span>
+            <label class="tm-switch">
+              <input type="checkbox" id="tm-sound-toggle" ${savedSoundEnabled ? 'checked' : ''} />
+              <span class="tm-switch-slider"></span>
+            </label>
+          </div>
         </div>
 
         <!-- PAY TAB -->
@@ -487,6 +498,10 @@
               <div class="tm-label">Max (s)</div>
               <input type="number" id="tm-poll-max" value="${savedPollMax}" min="1" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:9px 12px;font-family:inherit;font-size:13px;outline:none;" />
             </div>
+          </div>
+          <div class="tm-field" style="margin-top:8px;">
+            <div class="tm-label">🔔 Discord Webhook URL <span style="opacity:.5;font-size:10px;">(optional)</span></div>
+            <input type="text" id="tm-discord-webhook" placeholder="https://discord.com/api/webhooks/..." value="${escAttr(savedDiscordWebhook)}" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:10px;padding:8px 11px;font-family:inherit;font-size:11px;outline:none;" />
           </div>
         </div>
 
@@ -530,6 +545,7 @@
     document.getElementById('tm-start-bot-btn').addEventListener('click', startBot);
     document.getElementById('tm-stop-bot-btn').addEventListener('click', stopBot);
     document.getElementById('tm-auto-toggle').onchange = e => GM_setValue(STORAGE_AUTO, e.target.checked);
+    document.getElementById('tm-sound-toggle').onchange = e => GM_setValue(STORAGE_SOUND_ENABLED, e.target.checked);
     document.getElementById('tm-clear-url-btn').onclick = () => {
       const urlInput = document.getElementById('tm-target-url');
       urlInput.value = window.location.href.split('?')[0];
@@ -589,6 +605,8 @@
     const targetUrl = document.getElementById('tm-target-url')?.value.trim() || '';
     const pollMin = parseInt(document.getElementById('tm-poll-min')?.value) || 3;
     const pollMax = Math.max(pollMin, parseInt(document.getElementById('tm-poll-max')?.value) || 6);
+    const discordWebhook = document.getElementById('tm-discord-webhook')?.value.trim() || '';
+    const soundEnabled = document.getElementById('tm-sound-toggle')?.checked ?? true;
     
     GM_setValue(STORAGE_EMAIL, email);
     GM_setValue(STORAGE_PASS, pass);
@@ -599,6 +617,8 @@
     GM_setValue(STORAGE_TARGET_URL, targetUrl);
     GM_setValue(STORAGE_POLL_MIN, pollMin);
     GM_setValue(STORAGE_POLL_MAX, pollMax);
+    GM_setValue(STORAGE_DISCORD_WEBHOOK, discordWebhook);
+    GM_setValue(STORAGE_SOUND_ENABLED, soundEnabled);
     
     if (!email || !pass) {
       setStatus('success', 'Saved', 'Data saved (Login empty)');
@@ -619,6 +639,59 @@
       email: ei ? ei.value.trim() : GM_getValue(STORAGE_EMAIL, ''),
       pass: pi ? pi.value : GM_getValue(STORAGE_PASS, '')
     };
+  }
+
+  /* ─────────────────────────────────────────────
+     NOTIFICATION SOUNDS
+  ───────────────────────────────────────────── */
+  function playSound(type) {
+    if (!GM_getValue(STORAGE_SOUND_ENABLED, true)) return;
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const sequences = {
+        success: [{f:523,d:.12},{f:659,d:.12},{f:784,d:.22}],
+        stock:   [{f:880,d:.1},{f:988,d:.1},{f:1047,d:.1},{f:1175,d:.25}],
+        error:   [{f:400,d:.15},{f:300,d:.25}],
+        info:    [{f:660,d:.15}]
+      };
+      const notes = sequences[type] || sequences.info;
+      let t = ctx.currentTime;
+      notes.forEach(({f, d}) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.frequency.value = f;
+        gain.gain.setValueAtTime(0.25, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + d);
+        osc.start(t); osc.stop(t + d);
+        t += d + 0.03;
+      });
+    } catch(e) { /* audio not supported */ }
+  }
+
+  /* ─────────────────────────────────────────────
+     DISCORD WEBHOOK NOTIFICATION
+  ───────────────────────────────────────────── */
+  function sendDiscordNotification(title, description, color = 3066993) {
+    const webhookUrl = GM_getValue(STORAGE_DISCORD_WEBHOOK, '').trim();
+    if (!webhookUrl) return;
+    const payload = {
+      username: '🧸 Toymate Bot',
+      embeds: [{
+        title,
+        description,
+        color,
+        timestamp: new Date().toISOString(),
+        footer: { text: 'Toymate Auto Checkout & Restock Monitor' }
+      }]
+    };
+    GM_xmlhttpRequest({
+      method: 'POST',
+      url: webhookUrl,
+      headers: { 'Content-Type': 'application/json' },
+      data: JSON.stringify(payload),
+      onerror: () => logActivity('Discord notification failed.', 'warn')
+    });
   }
 
   /* ─────────────────────────────────────────────
@@ -942,6 +1015,12 @@
             logActivity(`✅ STOCK DETECTED for ${cleanUrl}`, 'success');
             setStatus('success', 'In Stock!', 'Triggering buy...', true);
             showToast('🎉 In Stock! Buying now!', 'success');
+            playSound('stock');
+            sendDiscordNotification(
+              '🎉 STOCK DETECTED!',
+              `Product is now **IN STOCK**!\n\n🔗 [${cleanUrl}](${cleanUrl})`,
+              0x00e676 // green
+            );
             onInStockCallback();
           } else {
              scheduleNextPoll();
@@ -1264,6 +1343,12 @@
           logActivity('Clicking Place Order button...', 'info');
           humanClick(placeOrderBtn).then(() => {
             logActivity('Click sent. Re-verifying in 2s...', 'success');
+            playSound('success');
+            sendDiscordNotification(
+              '✅ ORDER PLACED!',
+              `🛒 Place Order button clicked on Toymate checkout!\n\n🔗 [View Checkout](${window.location.href})`,
+              0x2196f3 // blue
+            );
             // Retry clicking after 2 seconds if the button is still there (heavy site)
             setTimeout(() => tryContinue(n + 1), 2000);
           });
