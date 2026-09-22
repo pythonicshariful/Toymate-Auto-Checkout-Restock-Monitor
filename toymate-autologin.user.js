@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Toymate Auto Checkout & Restock Monitor
 // @namespace    https://toymate.com.au/
-// @version      1.0.0
-// @description  Advanced auto-checkout and background restock monitoring bot for Toymate.
+// @version      1.1.0
+// @description  Advanced auto-checkout, background restock monitoring, and TCG release alert bot for Toymate.
 // @author       Pythonic Shariful
 // @match        https://toymate.com.au/*
 // @match        https://www.toymate.com.au/*
@@ -13,6 +13,7 @@
 // @grant        GM_xmlhttpRequest
 // @connect      toymate.com.au
 // @connect      www.toymate.com.au
+// @connect      checkout.toymate.com.au
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -34,7 +35,20 @@
   const STORAGE_POLL_MAX = 'tm_poll_max';
   const STORAGE_DISCORD_WEBHOOK = 'tm_discord_webhook';
   const STORAGE_SOUND_ENABLED = 'tm_sound_enabled';
+  const STORAGE_TARGET_QTY    = 'tm_target_qty';
+  const STORAGE_TCG_ENABLED   = 'tm_tcg_monitor_enabled';
+  const STORAGE_TCG_URL       = 'tm_tcg_category_url';
+  const STORAGE_TCG_KNOWN_IDS = 'tm_tcg_known_ids';
+  const STORAGE_AUTO_BUY_MONITOR = 'tm_auto_buy_monitor';
   const PANEL_ID = 'tm-autologin-panel';
+
+  // Background TCG monitor handle
+  let tcgPollTimeout = null;
+
+  // Background Page Monitor handle
+  let pageMonitorTimeout = null;
+  let pageMonitorRunning = false;
+  let knownProductStatuses = {}; // format: { productId: 'in_stock' | 'out_of_stock' }
 
   /* ─────────────────────────────────────────────
      STYLES – inject once
@@ -372,10 +386,14 @@
     const savedCcExp = GM_getValue(STORAGE_CC_EXP, '');
     const savedCcCvv = GM_getValue(STORAGE_CC_CVV, '');
     const savedTargetUrl = GM_getValue(STORAGE_TARGET_URL, '');
+    const savedTargetQty = GM_getValue(STORAGE_TARGET_QTY, 1);
     const savedPollMin = GM_getValue(STORAGE_POLL_MIN, 3);
     const savedPollMax = GM_getValue(STORAGE_POLL_MAX, 6);
     const savedDiscordWebhook = GM_getValue(STORAGE_DISCORD_WEBHOOK, '');
     const savedSoundEnabled = GM_getValue(STORAGE_SOUND_ENABLED, true);
+    const savedTcgEnabled = GM_getValue(STORAGE_TCG_ENABLED, false);
+    const savedTcgUrl = GM_getValue(STORAGE_TCG_URL, 'https://toymate.com.au/search/?term=pokemon+tcg');
+    const autoBuyMonitor = GM_getValue(STORAGE_AUTO_BUY_MONITOR, false);
     const autoEnabled = GM_getValue(STORAGE_AUTO, false);
 
     const panel = document.createElement('div');
@@ -396,9 +414,9 @@
         
         <div class="tm-tabs" id="tm-tabs">
           <div class="tm-tab active" data-target="tm-sec-auth">🔑 Login</div>
-          <div class="tm-tab" data-target="tm-sec-more">⚙️ More</div>
           <div class="tm-tab" data-target="tm-sec-pay">💳 Pay</div>
-          <div class="tm-tab" data-target="tm-sec-bot">🎯 Config</div>
+          <div class="tm-tab" data-target="tm-sec-bot">🎯 Bot</div>
+          <div class="tm-tab" data-target="tm-sec-alerts">📡 Alerts</div>
           <div class="tm-tab" data-target="tm-sec-product">📦 Item</div>
         </div>
 
@@ -429,33 +447,15 @@
               <button class="tm-eye-btn" id="tm-eye-btn" title="Toggle visibility">${ICON_EYE}</button>
             </div>
           </div>
-          <div class="tm-btn-row">
-            <button class="tm-btn tm-btn-primary" id="tm-login-btn" style="flex:1;">${ICON_KEY}&nbsp;Login Now</button>
-          </div>
-        </div>
-
-        <!-- MORE TAB (coupon + toggle) -->
-        <div class="tm-section" id="tm-sec-more">
-          <div class="tm-field">
-            <div class="tm-label">Coupon Code (Optional)</div>
-            <div class="tm-input-wrap">
-              <span class="tm-input-icon">${ICON_CART}</span>
-              <input id="tm-coupon" type="text" placeholder="e.g. TOYS10" value="${escAttr(savedCoupon)}" />
-            </div>
-          </div>
-          <div class="tm-toggle-row">
+          <div class="tm-toggle-row" style="margin-top:4px;">
             <span class="tm-toggle-label">🔄&nbsp; Auto-login on page load</span>
             <label class="tm-switch">
               <input type="checkbox" id="tm-auto-toggle" ${autoEnabled ? 'checked' : ''} />
               <span class="tm-switch-slider"></span>
             </label>
           </div>
-          <div class="tm-toggle-row">
-            <span class="tm-toggle-label">🔔&nbsp; Notification Sounds</span>
-            <label class="tm-switch">
-              <input type="checkbox" id="tm-sound-toggle" ${savedSoundEnabled ? 'checked' : ''} />
-              <span class="tm-switch-slider"></span>
-            </label>
+          <div class="tm-btn-row">
+            <button class="tm-btn tm-btn-primary" id="tm-login-btn" style="flex:1;">${ICON_KEY}&nbsp;Login Now</button>
           </div>
         </div>
 
@@ -478,7 +478,16 @@
               <input type="text" id="tm-cc-cvv" placeholder="123" value="${escAttr(savedCcCvv)}" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:9px 12px;font-family:inherit;font-size:13px;outline:none;" />
             </div>
           </div>
+          <div class="tm-field" style="margin-top:4px;">
+            <div class="tm-label">Coupon Code (Optional)</div>
+            <div class="tm-input-wrap">
+              <span class="tm-input-icon">${ICON_CART}</span>
+              <input id="tm-coupon" type="text" placeholder="e.g. TOYS10" value="${escAttr(savedCoupon)}" />
+            </div>
+          </div>
         </div>
+
+
 
         <!-- CONFIG TAB -->
         <div class="tm-section" id="tm-sec-bot">
@@ -490,6 +499,10 @@
               <button id="tm-empty-url-btn" title="Clear URL" style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:9px;padding:8px 10px;cursor:pointer;font-size:11px;white-space:nowrap;">❌</button>
             </div>
           </div>
+          <div class="tm-field" style="margin-top:8px;">
+            <div class="tm-label">📦 Buy Quantity <span style="opacity:.5;font-size:10px;">(for this URL)</span></div>
+            <input type="number" id="tm-target-qty" value="${savedTargetQty}" min="1" placeholder="1" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:9px 12px;font-family:inherit;font-size:13px;outline:none;" />
+          </div>
           <div style="display:flex;gap:8px;margin-top:8px;">
             <div class="tm-field" style="flex:1;">
               <div class="tm-label">Min (s)</div>
@@ -500,9 +513,38 @@
               <input type="number" id="tm-poll-max" value="${savedPollMax}" min="1" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:9px 12px;font-family:inherit;font-size:13px;outline:none;" />
             </div>
           </div>
-          <div class="tm-field" style="margin-top:8px;">
-            <div class="tm-label">🔔 Discord Webhook URL <span style="opacity:.5;font-size:10px;">(optional)</span></div>
+          <div class="tm-toggle-row" style="margin-top:8px;">
+            <span class="tm-toggle-label">⚡&nbsp; Auto-Buy Monitor Restocks</span>
+            <label class="tm-switch">
+              <input type="checkbox" id="tm-autobuy-monitor-toggle" ${autoBuyMonitor ? 'checked' : ''} />
+              <span class="tm-switch-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- ALERTS TAB -->
+        <div class="tm-section" id="tm-sec-alerts">
+          <div class="tm-field">
+            <div class="tm-label">🔔 Discord Webhook URL</div>
             <input type="text" id="tm-discord-webhook" placeholder="https://discord.com/api/webhooks/..." value="${escAttr(savedDiscordWebhook)}" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:10px;padding:8px 11px;font-family:inherit;font-size:11px;outline:none;" />
+          </div>
+          <div class="tm-toggle-row" style="margin-top:4px;">
+            <span class="tm-toggle-label">🔔&nbsp; Notification Sounds</span>
+            <label class="tm-switch">
+              <input type="checkbox" id="tm-sound-toggle" ${savedSoundEnabled ? 'checked' : ''} />
+              <span class="tm-switch-slider"></span>
+            </label>
+          </div>
+          <div class="tm-toggle-row">
+            <span class="tm-toggle-label">🃏&nbsp; TCG Release Alerts</span>
+            <label class="tm-switch">
+              <input type="checkbox" id="tm-tcg-toggle" ${savedTcgEnabled ? 'checked' : ''} />
+              <span class="tm-switch-slider"></span>
+            </label>
+          </div>
+          <div class="tm-field" id="tm-tcg-url-row" style="${savedTcgEnabled ? '' : 'opacity:.45;'}">
+            <div class="tm-label">🃏 TCG Search URL</div>
+            <input type="text" id="tm-tcg-url" value="${escAttr(savedTcgUrl)}" placeholder="https://toymate.com.au/..." style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:10px;padding:8px 11px;font-family:inherit;font-size:10.5px;outline:none;" />
           </div>
         </div>
 
@@ -526,6 +568,7 @@
         <div class="tm-btn-row" style="margin-bottom:8px;gap:6px;">
           <button class="tm-btn tm-btn-secondary" id="tm-save-btn" style="flex:1;padding:9px;font-size:12.5px;">${ICON_SAVE}&nbsp;Save</button>
           <button class="tm-btn tm-btn-primary" id="tm-login-btn-2" onclick="document.getElementById('tm-login-btn').click()" style="flex:1;padding:9px;font-size:12.5px;">${ICON_KEY}&nbsp;Login</button>
+          <button class="tm-btn tm-btn-secondary" id="tm-monitor-page-btn" style="flex:1;padding:9px;font-size:12.5px;background:linear-gradient(135deg, #06B6D4, #2563EB);color:#fff;border:none;box-shadow:0 4px 12px rgba(37,99,235,.25);" title="Monitor Target URL for stock changes">🔎 Monitor</button>
         </div>
         <div class="tm-qty-wrap" style="margin-top:0;gap:6px;">
           <input type="number" id="tm-qty-input" value="1" min="1" title="Qty" style="width:52px;" />
@@ -545,8 +588,21 @@
     document.getElementById('tm-login-btn').onclick = loginNow;
     document.getElementById('tm-start-bot-btn').addEventListener('click', startBot);
     document.getElementById('tm-stop-bot-btn').addEventListener('click', stopBot);
+    document.getElementById('tm-monitor-page-btn').addEventListener('click', togglePageMonitor);
     document.getElementById('tm-auto-toggle').onchange = e => GM_setValue(STORAGE_AUTO, e.target.checked);
     document.getElementById('tm-sound-toggle').onchange = e => GM_setValue(STORAGE_SOUND_ENABLED, e.target.checked);
+    document.getElementById('tm-autobuy-monitor-toggle').onchange = e => GM_setValue(STORAGE_AUTO_BUY_MONITOR, e.target.checked);
+    document.getElementById('tm-tcg-toggle').onchange = e => {
+      GM_setValue(STORAGE_TCG_ENABLED, e.target.checked);
+      const row = document.getElementById('tm-tcg-url-row');
+      if (row) row.style.opacity = e.target.checked ? '1' : '0.45';
+      if (e.target.checked) {
+        const url = document.getElementById('tm-tcg-url')?.value.trim();
+        if (url) startTcgMonitor(url);
+      } else {
+        stopTcgMonitor();
+      }
+    };
     document.getElementById('tm-clear-url-btn').onclick = () => {
       const urlInput = document.getElementById('tm-target-url');
       urlInput.value = window.location.href.split('?')[0];
@@ -610,10 +666,14 @@
     const ccExp = document.getElementById('tm-cc-exp')?.value.trim() || '';
     const ccCvv = document.getElementById('tm-cc-cvv')?.value.trim() || '';
     const targetUrl = document.getElementById('tm-target-url')?.value.trim() || '';
+    const targetQty = parseInt(document.getElementById('tm-target-qty')?.value) || 1;
     const pollMin = parseInt(document.getElementById('tm-poll-min')?.value) || 3;
     const pollMax = Math.max(pollMin, parseInt(document.getElementById('tm-poll-max')?.value) || 6);
     const discordWebhook = document.getElementById('tm-discord-webhook')?.value.trim() || '';
     const soundEnabled = document.getElementById('tm-sound-toggle')?.checked ?? true;
+    const autoBuyMonitor = document.getElementById('tm-autobuy-monitor-toggle')?.checked ?? false;
+    const tcgEnabled = document.getElementById('tm-tcg-toggle')?.checked ?? false;
+    const tcgUrl = document.getElementById('tm-tcg-url')?.value.trim() || 'https://toymate.com.au/search/?term=pokemon+tcg';
     
     GM_setValue(STORAGE_EMAIL, email);
     GM_setValue(STORAGE_PASS, pass);
@@ -622,10 +682,14 @@
     GM_setValue(STORAGE_CC_EXP, ccExp);
     GM_setValue(STORAGE_CC_CVV, ccCvv);
     GM_setValue(STORAGE_TARGET_URL, targetUrl);
+    GM_setValue(STORAGE_TARGET_QTY, targetQty);
     GM_setValue(STORAGE_POLL_MIN, pollMin);
     GM_setValue(STORAGE_POLL_MAX, pollMax);
     GM_setValue(STORAGE_DISCORD_WEBHOOK, discordWebhook);
     GM_setValue(STORAGE_SOUND_ENABLED, soundEnabled);
+    GM_setValue(STORAGE_AUTO_BUY_MONITOR, autoBuyMonitor);
+    GM_setValue(STORAGE_TCG_ENABLED, tcgEnabled);
+    GM_setValue(STORAGE_TCG_URL, tcgUrl);
     
     if (!email || !pass) {
       setStatus('success', 'Saved', 'Data saved (Login empty)');
@@ -970,6 +1034,256 @@
   }
 
   /* ─────────────────────────────────────────────
+     TCG RELEASE ALERT MONITOR
+     Polls a configurable search/category URL and
+     fires Discord + sound + toast when new product
+     IDs appear that weren't in the stored snapshot.
+  ───────────────────────────────────────────── */
+
+  function stopTcgMonitor() {
+    if (tcgPollTimeout) { clearTimeout(tcgPollTimeout); tcgPollTimeout = null; }
+    logActivity('TCG monitor stopped.', 'warn');
+  }
+
+  function startTcgMonitor(url) {
+    if (!url) return;
+    stopTcgMonitor(); // cancel any existing poll
+    logActivity(`TCG monitor started for: ${url}`, 'info');
+    scheduleTcgPoll(url);
+  }
+
+  function scheduleTcgPoll(url) {
+    const minDelay = GM_getValue(STORAGE_POLL_MIN, 3) * 1000;
+    const maxDelay = GM_getValue(STORAGE_POLL_MAX, 6) * 1000;
+    const delay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+    tcgPollTimeout = setTimeout(() => doTcgPoll(url), delay);
+  }
+
+  function doTcgPoll(url) {
+    if (!GM_getValue(STORAGE_TCG_ENABLED, false)) {
+      logActivity('TCG monitor disabled, stopping.', 'warn');
+      return;
+    }
+
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url: url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now(),
+      headers: {
+        'Accept': 'text/html',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache'
+      },
+      onload: function(res) {
+        if (!GM_getValue(STORAGE_TCG_ENABLED, false)) return;
+
+        // Extract all product IDs from hidden inputs: <input name="productId" value="XXXXX">
+        const matches = res.responseText.matchAll(/name="productId"\s+value="(\d+)"/g);
+        const liveIds = new Set();
+        for (const m of matches) liveIds.add(m[1]);
+
+        if (liveIds.size === 0) {
+          // Possibly a fetch issue or page changed structure — reschedule silently
+          scheduleTcgPoll(url);
+          return;
+        }
+
+        // Load stored snapshot
+        let knownIds;
+        try { knownIds = new Set(JSON.parse(GM_getValue(STORAGE_TCG_KNOWN_IDS, '[]'))); }
+        catch(e) { knownIds = new Set(); }
+
+        if (knownIds.size === 0) {
+          // First run — just save the current list as baseline
+          GM_setValue(STORAGE_TCG_KNOWN_IDS, JSON.stringify([...liveIds]));
+          logActivity(`TCG monitor: baseline saved (${liveIds.size} products).`, 'success');
+          scheduleTcgPoll(url);
+          return;
+        }
+
+        // Find genuinely new IDs
+        const newIds = [...liveIds].filter(id => !knownIds.has(id));
+
+        if (newIds.length > 0) {
+          // Extract product names for the new IDs
+          const newProducts = [];
+          for (const id of newIds) {
+            // Try to find the aria-label of the Add to Cart button for this product
+            const labelMatch = res.responseText.match(
+              new RegExp(`aria-label="Add to cart: ([^"]+)"[^>]+>[^<]*<[^<]*<[^<]*<input[^>]+productId[^>]+value="${id}"`, 'i')
+            ) || res.responseText.match(
+              new RegExp(`name="productId"\\s+value="${id}"[^<]{0,600}?aria-label="(?:Add to cart|Out of stock): ([^"]+)"`, 'i')
+            );
+            const name = labelMatch ? labelMatch[1].replace(/^(Add to cart|Out of stock): /i, '').trim() : `Product #${id}`;
+            newProducts.push({ id, name });
+          }
+
+          // Update the snapshot with all live IDs
+          GM_setValue(STORAGE_TCG_KNOWN_IDS, JSON.stringify([...liveIds]));
+
+          // Alert for each new product
+          newProducts.forEach(p => {
+            const productUrl = `https://toymate.com.au/search/?term=pokemon+tcg`;
+            logActivity(`🃏 NEW TCG ITEM: ${p.name} (ID: ${p.id})`, 'success');
+            showToast(`🃏 New TCG: ${p.name}`, 'success', 8000);
+            playSound('stock');
+            sendDiscordNotification(
+              '🃏 NEW TCG ITEM DETECTED!',
+              `A new Pokemon TCG product appeared on Toymate!\n\n**${p.name}** (Product ID: ${p.id})\n\n🔗 [Search Page](${url})\n🔗 [Check all TCG items](https://toymate.com.au/search/?term=pokemon+tcg)`,
+              0x9B59B6 // purple
+            );
+          });
+        }
+
+        // Reschedule next poll
+        scheduleTcgPoll(url);
+      },
+      onerror: function() {
+        // Network error — reschedule silently
+        scheduleTcgPoll(url);
+      }
+    });
+  }
+
+  /* ─────────────────────────────────────────────
+     BACKGROUND PAGE MONITOR (SEARCH/CATEGORY)
+  ───────────────────────────────────────────── */
+  function togglePageMonitor() {
+    if (pageMonitorRunning) {
+      pageMonitorRunning = false;
+      if (pageMonitorTimeout) { clearTimeout(pageMonitorTimeout); pageMonitorTimeout = null; }
+      const btn = document.getElementById('tm-monitor-page-btn');
+      if (btn) btn.innerHTML = '🔎 Monitor';
+      logActivity('Page monitor stopped.', 'warn');
+      showToast('Page Monitor Stopped', 'warning');
+      return;
+    }
+
+    let targetUrl = GM_getValue(STORAGE_TARGET_URL, '').trim();
+    if (!targetUrl) {
+      targetUrl = GM_getValue(STORAGE_TCG_URL, '').trim();
+    }
+    if (!targetUrl) {
+      showToast('Please set a Target URL in Config tab first!', 'error');
+      setStatus('error', 'No Target URL', 'Set URL in Config tab');
+      return;
+    }
+
+    pageMonitorRunning = true;
+    knownProductStatuses = {}; // Reset baseline on fresh start
+    const btn = document.getElementById('tm-monitor-page-btn');
+    if (btn) btn.innerHTML = '🛑 Stop Monitor';
+    
+    logActivity(`Starting page monitor on: ${targetUrl}`, 'info');
+    showToast('Page Monitor Started', 'info');
+    schedulePageMonitorPoll(targetUrl);
+  }
+
+  function schedulePageMonitorPoll(url) {
+    if (!pageMonitorRunning) return;
+    const uiMin = parseInt(document.getElementById('tm-poll-min')?.value);
+    const uiMax = parseInt(document.getElementById('tm-poll-max')?.value);
+    const minDelay = (uiMin > 0 ? uiMin : GM_getValue(STORAGE_POLL_MIN, 3)) * 1000;
+    const maxDelay = (Math.max((uiMax > 0 ? uiMax : GM_getValue(STORAGE_POLL_MAX, 6)), minDelay/1000)) * 1000;
+    const delay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+    
+    // Log the next check time so the user sees the random time
+    logActivity(`Next check in ${(delay/1000).toFixed(1)}s...`, 'info');
+    
+    pageMonitorTimeout = setTimeout(() => doPageMonitorPoll(url), delay);
+  }
+
+  function doPageMonitorPoll(url) {
+    if (!pageMonitorRunning) return;
+
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url: url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now(),
+      headers: {
+        'Accept': 'text/html',
+        'Cache-Control': 'no-cache, no-store, must-revalidate'
+      },
+      onload: function(res) {
+        if (!pageMonitorRunning) return;
+        
+        const doc = new DOMParser().parseFromString(res.responseText, 'text/html');
+        // Find forms that have a productId input (more reliable than form action)
+        const productForms = Array.from(doc.querySelectorAll('form')).filter(f => f.querySelector('input[name="productId"]'));
+        
+        let inStockCount = 0;
+        let outOfStockCount = 0;
+        let restockFound = false;
+
+        productForms.forEach(form => {
+          const idInput = form.querySelector('input[name="productId"]');
+          if (!idInput) return;
+          const pid = idInput.value;
+          
+          // Link and Name extraction
+          const card = form.closest('[data-product-id], .group') || form.parentElement;
+          const aTag = card ? card.querySelector('a[href*="/product/"]') : null;
+          const productLink = (aTag && aTag.getAttribute('href')) ? new URL(aTag.getAttribute('href'), window.location.origin).href : url;
+          
+          const btn = form.querySelector('button');
+          let productName = `Product #${pid}`;
+          if (btn && btn.getAttribute('aria-label')) {
+             productName = btn.getAttribute('aria-label').replace(/^(Add to cart|Out of stock):\s*/i, '').trim();
+          } else if (aTag) {
+             productName = aTag.textContent.trim() || productName;
+          }
+          
+          // Check button text for out of stock
+          const btnText = btn ? btn.textContent.toLowerCase() : '';
+          const ariaLabel = btn ? (btn.getAttribute('aria-label') || '').toLowerCase() : '';
+          const isOutOfStock = btnText.includes('out of stock') || btnText.includes('notify') || ariaLabel.includes('out of stock');
+          
+          const currentStatus = isOutOfStock ? 'out_of_stock' : 'in_stock';
+          if (currentStatus === 'in_stock') inStockCount++;
+          else outOfStockCount++;
+
+          // Compare with known baseline
+          if (knownProductStatuses[pid] === 'out_of_stock' && currentStatus === 'in_stock') {
+            logActivity(`🚀 RESTOCK DETECTED: ${productName}`, 'success');
+            showToast(`🚀 Restock: ${productName}`, 'success', 8000);
+            playSound('stock');
+            sendDiscordNotification(
+              '🚀 RESTOCK DETECTED!',
+              `A product is back in stock!\n\n**${productName}**\n\n🔗 [Buy Now](${productLink})`,
+              0x10B981 // green
+            );
+            
+            // Redirect if auto-buy is enabled
+            if (GM_getValue(STORAGE_AUTO_BUY_MONITOR, false)) {
+              logActivity(`Auto-buy enabled. Navigating to product...`, 'info');
+              setTimeout(() => { window.location.href = productLink; }, 1000);
+              restockFound = true;
+            } else {
+              logActivity(`Auto-buy disabled. Sound/Discord alert sent.`, 'warn');
+            }
+          }
+
+          knownProductStatuses[pid] = currentStatus;
+        });
+
+        if (productForms.length === 0) {
+          logActivity(`Page check: No products found on this page. Retrying...`, 'warn');
+        } else {
+          logActivity(`Checked URL: ${inStockCount} In Stock, ${outOfStockCount} Out of Stock`, 'info');
+        }
+
+        if (!restockFound) {
+          schedulePageMonitorPoll(url);
+        } else {
+          togglePageMonitor(); // Stop monitoring since we are redirecting
+        }
+      },
+      onerror: function() {
+        logActivity('Page monitor network error, retrying...', 'warn');
+        schedulePageMonitorPoll(url);
+      }
+    });
+  }
+
+  /* ─────────────────────────────────────────────
      BACKGROUND STOCK POLLING (no page refresh)
   ───────────────────────────────────────────── */
   let stockPollTimeout = null;
@@ -1105,8 +1419,14 @@
   function runBuyLoop() {
     if (!botRunning) return;
 
+    const uiTargetQty = parseInt(document.getElementById('tm-target-qty')?.value);
+    const savedTargetQty = GM_getValue(STORAGE_TARGET_QTY, 0);
+    const activeTargetQty = uiTargetQty > 0 ? uiTargetQty : savedTargetQty;
+    let currentQty = activeTargetQty > 0 ? activeTargetQty : 1;
+    
     const qtyInputUI = document.getElementById('tm-qty-input');
-    let currentQty = parseInt(qtyInputUI.value) || 1;
+    // Keep the UI in sync if the old action bar input exists
+    if (qtyInputUI) qtyInputUI.value = currentQty;
 
     const nativeQtyInput = document.querySelector('input[name="quantity"]');
     const form = nativeQtyInput ? nativeQtyInput.closest('form') : null;
@@ -1130,18 +1450,37 @@
     logActivity(`Attempting to add ${currentQty} to cart...`, 'info');
     setStatus('info', 'Running', `Attempting qty: ${currentQty}`, true);
 
-    humanType(nativeQtyInput, String(currentQty)).then(() => {
+    const setQtyPromise = new Promise(async (resolve) => {
+      const incBtn = document.querySelector('button[aria-label="Increase quantity"]');
+      if (incBtn && nativeQtyInput) {
+        let currentVal = parseInt(nativeQtyInput.value) || 1;
+        let diff = currentQty - currentVal;
+        if (diff > 0) {
+          logActivity(`Clicking increase button ${diff} times like a human...`, 'info');
+          for (let i = 0; i < diff; i++) {
+            if (!botRunning) return;
+            await humanClick(incBtn);
+            await new Promise(r => setTimeout(r, 30)); // 30ms between clicks
+          }
+        }
+        resolve();
+      } else {
+        humanType(nativeQtyInput, String(currentQty)).then(resolve);
+      }
+    });
+
+    setQtyPromise.then(() => {
       if (!botRunning) return;
 
       const cartBadge = document.querySelector('a[href="/cart/"] span');
       const initialCount = cartBadge ? parseInt(cartBadge.textContent) || 0 : 0;
 
-      // Re-query the Add to Cart button from the correct form as typing may have caused React to re-render it
+      // Re-query the Add to Cart button from the correct form as typing/clicking may have caused React to re-render it
       const freshForm = document.querySelector('input[name="quantity"]')?.closest('form');
       const freshAddBtn = freshForm ? Array.from(freshForm.querySelectorAll('button[type="submit"]')).find(b => b.textContent.toLowerCase().includes('add to cart')) : null;
 
       if (!freshAddBtn) {
-        logActivity('Add to cart button disappeared after typing. Retrying...', 'error');
+        logActivity('Add to cart button disappeared after setting quantity. Retrying...', 'error');
         botLoopTimeout = setTimeout(runBuyLoop, 1000);
         return;
       }
@@ -1443,6 +1782,12 @@
         checkHomePage();
         checkProductPage();
       }, 1500);
+    }
+
+    // Start TCG monitor independently of the main bot if enabled
+    if (GM_getValue(STORAGE_TCG_ENABLED, false)) {
+      const tcgUrl = GM_getValue(STORAGE_TCG_URL, 'https://toymate.com.au/search/?term=pokemon+tcg');
+      setTimeout(() => startTcgMonitor(tcgUrl), 2000);
     }
   }
 
