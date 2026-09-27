@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Toymate Auto Checkout & Restock Monitor
 // @namespace    https://toymate.com.au/
-// @version      1.1.0
-// @description  Advanced auto-checkout, background restock monitoring, and TCG release alert bot for Toymate.
+// @version      2.0.1
+// @description  Advanced auto-checkout, flash restock sniper, bezier human emulation, and TCG release alert bot for Toymate.
 // @author       Pythonic Shariful
 // @match        https://toymate.com.au/*
 // @match        https://www.toymate.com.au/*
@@ -14,44 +14,475 @@
 // @connect      toymate.com.au
 // @connect      www.toymate.com.au
 // @connect      checkout.toymate.com.au
-// @run-at       document-idle
+// @connect      discord.com
+// @connect      discordapp.com
+// @run-at       document-start
 // ==/UserScript==
 
 (function () {
   'use strict';
 
   /* ─────────────────────────────────────────────
-     CONSTANTS
+     ANTI-DETECTION: Early Browser Spoofing
   ───────────────────────────────────────────── */
-  const STORAGE_EMAIL = 'tm_auto_email';
-  const STORAGE_PASS = 'tm_auto_pass';
-  const STORAGE_AUTO = 'tm_auto_enable';
-  const STORAGE_COUPON = 'tm_auto_coupon';
-  const STORAGE_CC_NUM = 'tm_auto_cc_num';
-  const STORAGE_CC_EXP = 'tm_auto_cc_exp';
-  const STORAGE_CC_CVV = 'tm_auto_cc_cvv';
-  const STORAGE_TARGET_URL = 'tm_target_url';
-  const STORAGE_POLL_MIN = 'tm_poll_min';
-  const STORAGE_POLL_MAX = 'tm_poll_max';
-  const STORAGE_DISCORD_WEBHOOK = 'tm_discord_webhook';
-  const STORAGE_SOUND_ENABLED = 'tm_sound_enabled';
-  const STORAGE_TARGET_QTY    = 'tm_target_qty';
-  const STORAGE_TCG_ENABLED   = 'tm_tcg_monitor_enabled';
-  const STORAGE_TCG_URL       = 'tm_tcg_category_url';
-  const STORAGE_TCG_KNOWN_IDS = 'tm_tcg_known_ids';
-  const STORAGE_AUTO_BUY_MONITOR = 'tm_auto_buy_monitor';
-  const PANEL_ID = 'tm-autologin-panel';
-
-  // Background TCG monitor handle
-  let tcgPollTimeout = null;
-
-  // Background Page Monitor handle
-  let pageMonitorTimeout = null;
-  let pageMonitorRunning = false;
-  let knownProductStatuses = {}; // format: { productId: 'in_stock' | 'out_of_stock' }
+  try {
+    if (Object.defineProperty) {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined,
+        configurable: true
+      });
+    }
+  } catch (e) { /* ignore */ }
 
   /* ─────────────────────────────────────────────
-     STYLES – inject once
+     CONSTANTS & STORAGE KEYS
+  ───────────────────────────────────────────── */
+  const STORAGE_EMAIL            = 'tm_auto_email';
+  const STORAGE_PASS             = 'tm_auto_pass';
+  const STORAGE_AUTO             = 'tm_auto_enable';
+  const STORAGE_COUPON           = 'tm_auto_coupon';
+  const STORAGE_CC_NUM           = 'tm_auto_cc_num';
+  const STORAGE_CC_EXP           = 'tm_auto_cc_exp';
+  const STORAGE_CC_CVV           = 'tm_auto_cc_cvv';
+  const STORAGE_TARGET_URL       = 'tm_target_url';
+  const STORAGE_POLL_MIN         = 'tm_poll_min';
+  const STORAGE_POLL_MAX         = 'tm_poll_max';
+  const STORAGE_DISCORD_WEBHOOK  = 'tm_discord_webhook';
+  const STORAGE_SOUND_ENABLED    = 'tm_sound_enabled';
+  const STORAGE_TARGET_QTY       = 'tm_target_qty';
+  const STORAGE_TCG_ENABLED      = 'tm_tcg_monitor_enabled';
+  const STORAGE_TCG_URL          = 'tm_tcg_category_url';
+  const STORAGE_TCG_KNOWN_IDS    = 'tm_tcg_known_ids';
+  const STORAGE_AUTO_BUY_MONITOR = 'tm_auto_buy_monitor';
+  const STORAGE_PERSONALITY      = 'tm_personality_mode';
+  const STORAGE_TURBO_POLL       = 'tm_turbo_poll_enabled';
+  const STORAGE_BOT_DETECT_COUNT = 'tm_bot_detect_count';
+  const PANEL_ID                 = 'tm-autologin-panel';
+
+  /* ─────────────────────────────────────────────
+     PERSONALITY PROFILES (HUMAN TIMING VARIATION)
+  ───────────────────────────────────────────── */
+  const PROFILES = {
+    cautious: {
+      name: 'Cautious (Stealth)',
+      minType: 35, maxType: 80,
+      minPause: 300, maxPause: 700,
+      minHover: 120, maxHover: 260,
+      typoRate: 0.015,
+      bezierSteps: [8, 14],
+      scrollOvershoot: [30, 70]
+    },
+    normal: {
+      name: 'Normal (Balanced)',
+      minType: 18, maxType: 50,
+      minPause: 180, maxPause: 450,
+      minHover: 60, maxHover: 160,
+      typoRate: 0.008,
+      bezierSteps: [6, 10],
+      scrollOvershoot: [20, 50]
+    },
+    fast_typer: {
+      name: 'Turbo Sniper (Fast)',
+      minType: 8, maxType: 24,
+      minPause: 80, maxPause: 220,
+      minHover: 30, maxHover: 90,
+      typoRate: 0.002,
+      bezierSteps: [4, 7],
+      scrollOvershoot: [10, 30]
+    }
+  };
+
+  function getActiveProfile() {
+    const key = GM_getValue(STORAGE_PERSONALITY, 'normal');
+    return PROFILES[key] || PROFILES.normal;
+  }
+
+  /* ─────────────────────────────────────────────
+     BOT STATE MACHINE
+  ───────────────────────────────────────────── */
+  const BotState = {
+    IDLE: 'IDLE',
+    MONITORING: 'MONITORING',
+    TURBO_MONITORING: 'TURBO_MONITORING',
+    PRODUCT_DETECTED: 'PRODUCT_DETECTED',
+    ADJUSTING_QTY: 'ADJUSTING_QTY',
+    ADDING_TO_CART: 'ADDING_TO_CART',
+    VERIFYING_CART: 'VERIFYING_CART',
+    NAVIGATING_TO_CART: 'NAVIGATING_TO_CART',
+    ON_CART_PAGE: 'ON_CART_PAGE',
+    CHECKOUT_SHIPPING: 'CHECKOUT_SHIPPING',
+    CHECKOUT_PAYMENT: 'CHECKOUT_PAYMENT',
+    COMPLETED: 'COMPLETED',
+    BACKOFF_RETRY: 'BACKOFF_RETRY'
+  };
+
+  let currentState = BotState.IDLE;
+  let botRunning = false;
+  let botLoopTimeout = null;
+  let stockPollTimeout = null;
+  let tcgPollTimeout = null;
+  let pageMonitorTimeout = null;
+  let pageMonitorRunning = false;
+  let liveProductObserver = null;
+  let watchdogInterval = null;
+  let lastActivityTimestamp = Date.now();
+  let turboModeExpiresAt = 0;
+  let knownProductStatuses = {};
+
+  function setBotState(newState, detail = '') {
+    currentState = newState;
+    lastActivityTimestamp = Date.now();
+    const badge = document.getElementById('tm-bot-state-badge');
+    if (badge) {
+      badge.textContent = newState + (detail ? ` (${detail})` : '');
+    }
+  }
+
+  /* ─────────────────────────────────────────────
+     HUMAN EMULATION LAYER
+     - Cursor tracking
+     - Cubic Bezier curved mouse trajectories
+     - Scroll with overshoot & settle
+     - Realistic keyboard events with typo correction
+     - PointerEvent + MouseEvent synthetic event dispatch
+  ───────────────────────────────────────────── */
+  let lastMouseX = Math.floor(window.innerWidth / 2) || 400;
+  let lastMouseY = Math.floor(window.innerHeight / 2) || 300;
+
+  document.addEventListener('mousemove', e => {
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+  }, { passive: true });
+
+  function randDelay(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
+  function bezierPoint(p0, p1, p2, p3, t) {
+    const cX = 3 * (p1.x - p0.x);
+    const bX = 3 * (p2.x - p1.x) - cX;
+    const aX = p3.x - p0.x - cX - bX;
+
+    const cY = 3 * (p1.y - p0.y);
+    const bY = 3 * (p2.y - p1.y) - cY;
+    const aY = p3.y - p0.y - cY - bY;
+
+    const x = aX * Math.pow(t, 3) + bX * Math.pow(t, 2) + cX * t + p0.x;
+    const y = aY * Math.pow(t, 3) + bY * Math.pow(t, 2) + cY * t + p0.y;
+
+    return { x, y };
+  }
+
+  /**
+   * Smoothly moves mouse from current position to element center along a curved trajectory
+   */
+  async function simulateMouseTrajectory(targetEl) {
+    if (!targetEl || !document.body.contains(targetEl)) return;
+    const profile = getActiveProfile();
+    const rect = targetEl.getBoundingClientRect();
+    
+    const targetX = rect.left + rect.width * (0.35 + Math.random() * 0.3);
+    const targetY = rect.top + rect.height * (0.35 + Math.random() * 0.3);
+
+    const start = { x: lastMouseX, y: lastMouseY };
+    const end = { x: targetX, y: targetY };
+
+    const distance = Math.hypot(end.x - start.x, end.y - start.y);
+    const curvature = Math.min(distance * 0.25, 80) * (Math.random() > 0.5 ? 1 : -1);
+
+    const cp1 = {
+      x: start.x + (end.x - start.x) * 0.25 + (Math.random() * curvature - curvature / 2),
+      y: start.y + (end.y - start.y) * 0.25 - curvature
+    };
+    const cp2 = {
+      x: start.x + (end.x - start.x) * 0.75 + (Math.random() * curvature - curvature / 2),
+      y: start.y + (end.y - start.y) * 0.75 + curvature * 0.5
+    };
+
+    const steps = randDelay(profile.bezierSteps[0], profile.bezierSteps[1]);
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const pt = bezierPoint(start, cp1, cp2, end, t);
+      const jitterX = (Math.random() - 0.5) * 2;
+      const jitterY = (Math.random() - 0.5) * 2;
+      
+      const currentPtX = Math.round(pt.x + jitterX);
+      const currentPtY = Math.round(pt.y + jitterY);
+      lastMouseX = currentPtX;
+      lastMouseY = currentPtY;
+
+      const evtInit = {
+        clientX: currentPtX,
+        clientY: currentPtY,
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window
+      };
+      
+      const elAtPt = document.elementFromPoint(currentPtX, currentPtY) || targetEl;
+      try {
+        if (window.PointerEvent) {
+          elAtPt.dispatchEvent(new PointerEvent('pointermove', evtInit));
+        }
+        elAtPt.dispatchEvent(new MouseEvent('mousemove', evtInit));
+      } catch (e) {}
+
+      await new Promise(r => setTimeout(r, randDelay(6, 16)));
+    }
+  }
+
+  /**
+   * Human-like scrolling with smooth overshoot and settling
+   */
+  async function humanScrollTo(targetEl) {
+    if (!targetEl || !document.body.contains(targetEl)) return;
+    const profile = getActiveProfile();
+    const rect = targetEl.getBoundingClientRect();
+    const isVisible = rect.top >= 50 && rect.bottom <= (window.innerHeight - 50);
+
+    if (!isVisible) {
+      const overshoot = randDelay(profile.scrollOvershoot[0], profile.scrollOvershoot[1]);
+      const targetScrollY = window.scrollY + rect.top - (window.innerHeight / 2) + overshoot;
+
+      window.scrollTo({
+        top: Math.max(0, targetScrollY),
+        behavior: 'smooth'
+      });
+
+      await new Promise(r => setTimeout(r, randDelay(180, 320)));
+
+      window.scrollTo({
+        top: Math.max(0, targetScrollY - overshoot),
+        behavior: 'smooth'
+      });
+
+      await new Promise(r => setTimeout(r, randDelay(120, 220)));
+    }
+  }
+
+  /**
+   * Complete human click: Scroll -> Curved Mouse Trajectory -> Hover -> Mousedown -> Mouseup -> Click
+   * Compatible with React 18 synthetic event delegation & PointerEvents
+   */
+  async function humanClick(el) {
+    if (!el || !document.body.contains(el)) return;
+    const profile = getActiveProfile();
+
+    await humanScrollTo(el);
+    await simulateMouseTrajectory(el);
+
+    if (!document.body.contains(el)) return;
+
+    const rect = el.getBoundingClientRect();
+    const clientX = rect.left + rect.width / 2;
+    const clientY = rect.top + rect.height / 2;
+
+    const eventOpts = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX,
+      clientY,
+      button: 0,
+      buttons: 1
+    };
+
+    // 1. Mouse & Pointer Over
+    try {
+      el.dispatchEvent(new MouseEvent('mouseover', eventOpts));
+      el.dispatchEvent(new MouseEvent('mouseenter', eventOpts));
+      if (window.PointerEvent) {
+        el.dispatchEvent(new PointerEvent('pointerover', eventOpts));
+        el.dispatchEvent(new PointerEvent('pointerenter', eventOpts));
+      }
+    } catch (e) {}
+
+    await new Promise(r => setTimeout(r, randDelay(profile.minHover, profile.maxHover)));
+    if (!document.body.contains(el)) return;
+
+    // 2. Pointerdown / Mousedown
+    try {
+      if (window.PointerEvent) {
+        el.dispatchEvent(new PointerEvent('pointerdown', eventOpts));
+      }
+      el.dispatchEvent(new MouseEvent('mousedown', eventOpts));
+    } catch (e) {}
+
+    await new Promise(r => setTimeout(r, randDelay(30, 75)));
+    if (!document.body.contains(el)) return;
+
+    // 3. Pointerup / Mouseup
+    const upOpts = { ...eventOpts, buttons: 0 };
+    try {
+      if (window.PointerEvent) {
+        el.dispatchEvent(new PointerEvent('pointerup', upOpts));
+      }
+      el.dispatchEvent(new MouseEvent('mouseup', upOpts));
+      el.dispatchEvent(new MouseEvent('click', upOpts));
+    } catch (e) {}
+
+    // 4. Native invocation
+    if (typeof el.click === 'function') {
+      try { el.click(); } catch (e) {}
+    }
+
+    // Also trigger on closest button if click target was an inner span/svg
+    const parentBtn = el.closest('button');
+    if (parentBtn && parentBtn !== el && typeof parentBtn.click === 'function') {
+      try { parentBtn.click(); } catch (e) {}
+    }
+
+    await new Promise(r => setTimeout(r, randDelay(50, 120)));
+  }
+
+  /**
+   * Key code mapping for realistic keyboard events
+   */
+  function getKeyMetadata(char) {
+    if (char >= 'a' && char <= 'z') {
+      return { code: 'Key' + char.toUpperCase(), key: char, isShift: false };
+    }
+    if (char >= 'A' && char <= 'Z') {
+      return { code: 'Key' + char, key: char, isShift: true };
+    }
+    if (char >= '0' && char <= '9') {
+      return { code: 'Digit' + char, key: char, isShift: false };
+    }
+    const special = {
+      '@': { code: 'Digit2', key: '@', isShift: true },
+      '.': { code: 'Period', key: '.', isShift: false },
+      '-': { code: 'Minus', key: '-', isShift: false },
+      '_': { code: 'Minus', key: '_', isShift: true },
+      ' ': { code: 'Space', key: ' ', isShift: false }
+    };
+    return special[char] || { code: 'Key' + char.toUpperCase(), key: char, isShift: false };
+  }
+
+  /**
+   * Realistic human typing with keydown -> keypress -> input -> keyup
+   */
+  function humanType(el, text) {
+    return new Promise(async (resolve) => {
+      if (!el || !document.body.contains(el)) return resolve();
+      const profile = getActiveProfile();
+
+      await humanClick(el);
+      el.focus();
+
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, 'value'
+      )?.set || function (v) { el.value = v; };
+
+      nativeSetter.call(el, '');
+      el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+
+      for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        const meta = getKeyMetadata(char);
+
+        if (Math.random() < profile.typoRate && char.match(/[a-z0-9]/i)) {
+          const typoChar = String.fromCharCode(char.charCodeAt(0) + (Math.random() > 0.5 ? 1 : -1));
+          nativeSetter.call(el, el.value + typoChar);
+          el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+          await new Promise(r => setTimeout(r, randDelay(100, 200)));
+          
+          nativeSetter.call(el, el.value.slice(0, -1));
+          el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+          await new Promise(r => setTimeout(r, randDelay(60, 140)));
+        }
+
+        const keyInit = {
+          key: meta.key,
+          code: meta.code,
+          shiftKey: meta.isShift,
+          bubbles: true,
+          cancelable: true,
+          composed: true
+        };
+
+        el.dispatchEvent(new KeyboardEvent('keydown', keyInit));
+        el.dispatchEvent(new KeyboardEvent('keypress', keyInit));
+
+        nativeSetter.call(el, el.value + char);
+        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+
+        el.dispatchEvent(new KeyboardEvent('keyup', keyInit));
+
+        await new Promise(r => setTimeout(r, randDelay(profile.minType, profile.maxType)));
+      }
+
+      await new Promise(r => setTimeout(r, randDelay(profile.minPause / 2, profile.maxPause / 2)));
+      el.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+      resolve();
+    });
+  }
+
+  /* ─────────────────────────────────────────────
+     ROBUST ELEMENT LOCATORS FOR TOYMATE REACT UI
+  ───────────────────────────────────────────── */
+  function findAddToCartButton() {
+    const buttons = Array.from(document.querySelectorAll('button'));
+    const found = buttons.find(b => {
+      if (b.disabled || b.getAttribute('aria-disabled') === 'true') return false;
+      const txt = (b.textContent || '').trim().toLowerCase();
+      const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+      return (txt.includes('add to cart') || aria.includes('add to cart')) && !txt.includes('out of stock') && !txt.includes('sold out');
+    });
+    if (found) return found;
+
+    // Fallback: look for submit buttons inside product purchase containers
+    const submitBtns = Array.from(document.querySelectorAll('button[type="submit"]:not([disabled])'));
+    return submitBtns[0] || null;
+  }
+
+  function findQuantityControls() {
+    const input = document.querySelector('input[name="quantity"]')
+      || document.querySelector('input[aria-label="Quantity"]')
+      || document.querySelector('input[id*="quantity"]')
+      || document.querySelector('input[type="number"]');
+
+    // Increase and decrease buttons in Toymate's number-input component
+    const incBtn = document.querySelector('button[aria-label="Increase quantity"]')
+      || document.querySelector('button[aria-label*="increase" i]')
+      || (input ? input.parentElement?.querySelector('button:last-of-type') : null);
+
+    const decBtn = document.querySelector('button[aria-label="Decrease quantity"]')
+      || document.querySelector('button[aria-label*="decrease" i]')
+      || (input ? input.parentElement?.querySelector('button:first-of-type') : null);
+
+    return { input, incBtn, decBtn };
+  }
+
+  function findCartLink() {
+    const links = Array.from(document.querySelectorAll('a[aria-label="Cart"], a[href="/cart/"], a[href*="/cart"]'));
+    const visible = links.find(el => {
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && window.getComputedStyle(el).display !== 'none' && window.getComputedStyle(el).visibility !== 'hidden';
+    });
+    return visible || links[0] || null;
+  }
+
+  function getCartBadgeInfo() {
+    const link = findCartLink();
+    if (!link) {
+      const span = document.querySelector('a[href*="cart"] span, span[class*="nav-cart-count"]');
+      if (span) {
+        const count = parseInt(span.textContent.trim()) || 0;
+        return { hasBadge: true, count, link: span.closest('a') || findCartLink(), span };
+      }
+      return { hasBadge: false, count: 0, link: null };
+    }
+    const span = link.querySelector('span') || link.parentElement?.querySelector('span[class*="nav-cart-count"]');
+    if (!span) return { hasBadge: false, count: 0, link };
+    const count = parseInt(span.textContent.trim()) || 0;
+    return { hasBadge: true, count, link, span };
+  }
+
+  /* ─────────────────────────────────────────────
+     STYLES (MODERN GLASSMORPHISM DESIGN)
   ───────────────────────────────────────────── */
   function injectStyles() {
     if (document.getElementById('tm-autologin-styles')) return;
@@ -62,13 +493,13 @@
       @keyframes tm-spin      { to { transform: rotate(360deg); } }
       @keyframes tm-gradient  { 0%{background-position:0% 50%} 50%{background-position:100% 50%} 100%{background-position:0% 50%} }
       @keyframes tm-pulse     { 0%,100%{opacity:.6} 50%{opacity:1} }
+      @keyframes tm-turbo     { 0%{box-shadow:0 0 4px #F59E0B} 50%{box-shadow:0 0 16px #EF4444} 100%{box-shadow:0 0 4px #F59E0B} }
 
       #tm-toggle-bubble {
         position:fixed; bottom:24px; right:24px; z-index:2147483640;
         width:56px; height:56px; border-radius:50%; cursor:pointer;
         background:linear-gradient(135deg, #7C3AED 0%, #2563EB 100%);
-        border:none;
-        display:flex; align-items:center; justify-content:center;
+        border:none; display:flex; align-items:center; justify-content:center;
         box-shadow:0 8px 32px rgba(124,58,237,.45), 0 2px 8px rgba(0,0,0,.3);
         transition:transform .2s ease, box-shadow .2s ease;
       }
@@ -80,13 +511,13 @@
 
       #tm-autologin-panel {
         position:fixed; bottom:96px; right:28px; z-index:2147483641;
-        width:360px; border-radius:20px; overflow:hidden;
+        width:380px; border-radius:20px; overflow:hidden;
         font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
         animation:tm-fadeIn .35s cubic-bezier(.22,1,.36,1) both;
         box-shadow:0 0 0 1px rgba(255,255,255,.08),0 24px 64px rgba(0,0,0,.55),0 0 80px rgba(124,58,237,.18);
         backdrop-filter:blur(24px) saturate(1.6);
         -webkit-backdrop-filter:blur(24px) saturate(1.6);
-        background:rgba(12,12,20,.88);
+        background:rgba(12,12,20,.92);
       }
       #tm-autologin-panel.tm-hidden { display:none; }
 
@@ -97,106 +528,96 @@
       }
       .tm-header {
         display:flex; align-items:center; justify-content:space-between;
-        padding:18px 20px 12px;
-        border-bottom:1px solid rgba(255,255,255,.07);
+        padding:16px 20px 10px;
       }
-      .tm-header-left { display:flex; align-items:center; gap:10px; }
-      .tm-logo {
+      .tm-title-group { display:flex; align-items:center; gap:10px; }
+      .tm-icon-wrap {
         width:34px; height:34px; border-radius:10px;
         background:linear-gradient(135deg,#7C3AED,#2563EB);
         display:flex; align-items:center; justify-content:center;
-        box-shadow:0 2px 8px rgba(124,58,237,.4); font-size:18px; line-height:1;
+        font-size:18px; box-shadow:0 4px 12px rgba(124,58,237,.4);
       }
-      .tm-title { color:#fff; font-size:14px; font-weight:700; letter-spacing:.3px; }
-      .tm-subtitle { color:rgba(255,255,255,.4); font-size:11px; margin-top:1px; }
+      .tm-title { font-size:15px; font-weight:700; color:#fff; letter-spacing:-.2px; }
+      .tm-subtitle { font-size:11px; color:rgba(255,255,255,.45); margin-top:1px; }
+
+      .tm-badge-row {
+        display:flex; gap:6px; align-items:center; padding:0 20px 10px;
+      }
+      .tm-state-badge {
+        font-size:10px; font-weight:700; text-transform:uppercase;
+        padding:3px 8px; border-radius:12px; background:rgba(255,255,255,.08);
+        color:rgba(255,255,255,.8); border:1px solid rgba(255,255,255,.12);
+        letter-spacing:0.4px;
+      }
+      .tm-turbo-badge {
+        font-size:10px; font-weight:700; text-transform:uppercase;
+        padding:3px 8px; border-radius:12px; background:rgba(239,68,68,.2);
+        color:#FCA5A5; border:1px solid rgba(239,68,68,.4);
+        display:none; animation:tm-turbo 1.5s infinite;
+      }
+
       .tm-close-btn {
         background:rgba(255,255,255,.07); border:none; border-radius:8px;
-        width:30px; height:30px; display:flex; align-items:center; justify-content:center;
-        cursor:pointer; color:rgba(255,255,255,.5); transition:background .2s, color .2s;
+        width:28px; height:28px; cursor:pointer; color:rgba(255,255,255,.5);
+        display:flex; align-items:center; justify-content:center; transition:all .15s;
       }
       .tm-close-btn:hover { background:rgba(255,255,255,.14); color:#fff; }
 
-      .tm-body { padding:18px 20px 20px; display:flex; flex-direction:column; gap:14px; }
-
-      .tm-field, .tm-form-group { display:flex; flex-direction:column; gap:5px; }
-      .tm-label { color:rgba(255,255,255,.5); font-size:11px; font-weight:600; letter-spacing:.8px; text-transform:uppercase; }
-      .tm-input-wrap, .tm-input-wrapper {
+      .tm-body { padding:0 20px 14px; }
+      .tm-field { margin-bottom:10px; }
+      .tm-label { font-size:11px; font-weight:600; color:rgba(255,255,255,.6); margin-bottom:4px; text-transform:uppercase; letter-spacing:.5px; }
+      .tm-input-wrap {
         position:relative; display:flex; align-items:center;
         background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.1);
-        border-radius:12px; transition:border-color .2s, box-shadow .2s, background .2s;
+        border-radius:10px; transition:border-color .2s;
       }
-      .tm-input-wrap:focus-within, .tm-input-wrapper:focus-within {
-        border-color:rgba(124,58,237,.7); box-shadow:0 0 0 3px rgba(124,58,237,.18);
-        background:rgba(255,255,255,.09);
+      .tm-input-wrap:focus-within { border-color:#7C3AED; background:rgba(255,255,255,.09); }
+      .tm-input-icon { padding-left:12px; color:rgba(255,255,255,.35); display:flex; align-items:center; }
+      .tm-input {
+        width:100%; padding:9px 12px 9px 8px; background:transparent; border:none;
+        outline:none; color:#fff; font-size:13px; font-family:inherit;
       }
-      .tm-input-icon { position:absolute; left:14px; color:rgba(255,255,255,.3); display:flex; align-items:center; pointer-events:none; }
-      .tm-input-wrap input, .tm-input-wrapper input {
-        width:100%; background:transparent; border:none; outline:none;
-        color:#fff; font-size:13.5px; font-family:inherit;
-        padding:12px 14px 12px 42px;
+      .tm-input::placeholder { color:rgba(255,255,255,.25); }
+      .tm-input-btn {
+        background:none; border:none; padding:0 10px; color:rgba(255,255,255,.35);
+        cursor:pointer; display:flex; align-items:center; transition:color .15s;
       }
-      .tm-input-wrap input::placeholder, .tm-input-wrapper input::placeholder { color:rgba(255,255,255,.25); }
-      .tm-eye-btn {
-        position:absolute; right:12px; background:none; border:none; cursor:pointer;
-        color:rgba(255,255,255,.3); display:flex; align-items:center;
-        padding:4px; border-radius:6px; transition:color .2s;
+      .tm-input-btn:hover { color:#fff; }
+
+      .tm-select {
+        width:100%; padding:8px 12px; background:rgba(255,255,255,.06);
+        border:1px solid rgba(255,255,255,.12); border-radius:10px;
+        color:#fff; font-size:12.5px; outline:none; font-family:inherit;
       }
-      .tm-eye-btn:hover { color:rgba(255,255,255,.7); }
+      .tm-select option { background:#1E1E2E; color:#fff; }
 
       .tm-toggle-row {
         display:flex; align-items:center; justify-content:space-between;
-        padding:10px 14px; background:rgba(255,255,255,.04);
-        border:1px solid rgba(255,255,255,.07); border-radius:12px;
+        padding:8px 0; border-top:1px solid rgba(255,255,255,.06);
       }
-      .tm-toggle-label { color:rgba(255,255,255,.65); font-size:12.5px; }
-      .tm-switch { position:relative; width:40px; height:22px; }
-      .tm-switch input { display:none; }
+      .tm-toggle-label { font-size:12px; color:rgba(255,255,255,.8); font-weight:500; }
+      .tm-switch { position:relative; display:inline-block; width:40px; height:22px; }
+      .tm-switch input { opacity:0; width:0; height:0; }
       .tm-switch-slider {
-        position:absolute; inset:0; cursor:pointer;
-        background:rgba(255,255,255,.12); border-radius:22px; transition:background .3s;
+        position:absolute; inset:0; border-radius:22px; cursor:pointer;
+        background:rgba(255,255,255,.15); transition:.25s;
       }
-      .tm-switch-slider::before {
-        content:''; position:absolute;
-        width:16px; height:16px; border-radius:50%;
-        left:3px; top:3px; background:#fff; transition:transform .3s;
-        box-shadow:0 1px 4px rgba(0,0,0,.4);
+      .tm-switch-slider:before {
+        content:''; position:absolute; height:16px; width:16px;
+        left:3px; bottom:3px; border-radius:50%; background:#fff;
+        transition:.25s; box-shadow:0 2px 4px rgba(0,0,0,.3);
       }
-      .tm-switch input:checked + .tm-switch-slider { background:linear-gradient(135deg,#7C3AED,#2563EB); }
-      .tm-switch input:checked + .tm-switch-slider::before { transform:translateX(18px); }
+      .tm-switch input:checked + .tm-switch-slider { background:#7C3AED; }
+      .tm-switch input:checked + .tm-switch-slider:before { transform:translateX(18px); }
 
-      .tm-btn-row { display:flex; gap:10px; }
-      .tm-btn {
-        display:block; width:100%; padding:11px;
-        border-radius:10px; border:none; cursor:pointer;
-        font-family:inherit; font-size:13px; font-weight:700;
-        text-align:center; transition:all .2s; margin-top:8px;
-        display:flex; align-items:center; justify-content:center; gap:6px;
-      }
-      .tm-btn-primary {
-        background:linear-gradient(135deg, #7C3AED 0%, #2563EB 100%);
-        color:#fff; box-shadow:0 4px 16px rgba(124,58,237,.35);
-      }
-      .tm-btn-primary:hover { transform:translateY(-1px); box-shadow:0 6px 20px rgba(124,58,237,.5); }
-      .tm-btn-secondary {
-        background:rgba(255,255,255,.07); color:rgba(255,255,255,.8);
-        border:1px solid rgba(255,255,255,.12);
-      }
-      .tm-btn-secondary:hover { background:rgba(255,255,255,.12); }
-      .tm-btn-success {
-        background:linear-gradient(135deg, #059669 0%, #10B981 100%);
-        color:#fff; box-shadow:0 4px 16px rgba(16,185,129,.3);
-      }
-      .tm-btn-success:hover { transform:translateY(-1px); }
-
-      /* Nintendo-style Status Badge */
       .tm-status {
-        display:flex; align-items:center; gap:10px;
-        padding:12px 14px; border-radius:12px; margin-bottom:12px;
-        border:1px solid transparent;
+        margin:8px 0 12px; padding:10px 14px; border-radius:12px;
+        display:flex; align-items:center; gap:10px; font-size:12px;
+        border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.04);
       }
-      .tm-status.info    { background:rgba(37,99,235,.15);  border-color:rgba(37,99,235,.3); }
-      .tm-status.success { background:rgba(16,185,129,.12); border-color:rgba(16,185,129,.3); }
-      .tm-status.warn    { background:rgba(245,158,11,.15); border-color:rgba(245,158,11,.3); }
+      .tm-status.info    { background:rgba(37,99,235,.15);  border-color:rgba(37,99,235,.35); }
+      .tm-status.success { background:rgba(16,185,129,.15); border-color:rgba(16,185,129,.35); }
+      .tm-status.warn    { background:rgba(245,158,11,.15); border-color:rgba(245,158,11,.35); }
       .tm-status.error   { background:rgba(239,68,68,.15);  border-color:rgba(239,68,68,.35); }
       
       .tm-status-dot { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
@@ -209,24 +630,22 @@
       .tm-status-title { font-size:13px; font-weight:700; color:#fff; }
       .tm-status-desc  { font-size:11px; color:rgba(255,255,255,.55); margin-top:2px; }
 
-      /* Page Badge */
       .tm-page-badge {
         display:inline-flex; align-items:center; gap:5px;
         padding:4px 10px; border-radius:20px; font-size:10px;
-        font-weight:700; letter-spacing:.5px; text-transform:uppercase; margin-bottom:14px;
+        font-weight:700; letter-spacing:.5px; text-transform:uppercase; margin-bottom:10px;
       }
       .tm-page-badge.product { background:rgba(230,0,18,.2); color:#ff7070; border:1px solid rgba(230,0,18,.3); }
       .tm-page-badge.home    { background:rgba(16,185,129,.15); color:#6ee7b7; border:1px solid rgba(16,185,129,.25); }
       .tm-page-badge.login   { background:rgba(99,102,241,.2); color:#a5b4fc; border:1px solid rgba(99,102,241,.3); }
       .tm-page-badge.other   { background:rgba(255,255,255,.08); color:rgba(255,255,255,.5); border:1px solid rgba(255,255,255,.12); }
 
-      /* Toast */
       .tm-toast {
         position:fixed; bottom:100px; right:24px; z-index:2147483647;
         padding:12px 18px; border-radius:12px; font-family:inherit;
         font-size:13px; font-weight:600; color:#fff;
         box-shadow:0 8px 32px rgba(0,0,0,.4); display:flex; align-items:center; gap:8px;
-        animation:tm-toast-in .3s cubic-bezier(.34,1.56,.64,1) forwards; max-width:300px;
+        animation:tm-toast-in .3s cubic-bezier(.34,1.56,.64,1) forwards; max-width:320px;
       }
       .tm-toast.success { background:linear-gradient(135deg, #059669, #10B981); }
       .tm-toast.error   { background:linear-gradient(135deg, #DC2626, #EF4444); }
@@ -240,58 +659,55 @@
         border:2px solid rgba(255,255,255,.2); border-top-color:#fff;
         animation:tm-spin .7s linear infinite; flex-shrink:0; display:inline-block;
       }
-      .tm-divider { height:1px; background:rgba(255,255,255,.06); margin:12px 0; }
+      .tm-divider { height:1px; background:rgba(255,255,255,.06); margin:10px 0; }
       .tm-footer {
-        padding:10px 20px 14px; display:flex; align-items:center; justify-content:center;
-        color:rgba(255,255,255,.2); font-size:11px; font-family:inherit;
+        padding:8px 20px 12px; display:flex; align-items:center; justify-content:center;
+        color:rgba(255,255,255,.2); font-size:10.5px; font-family:inherit;
       }
 
-      /* Tabs */
       .tm-tabs {
         display:flex; border-bottom:1px solid rgba(255,255,255,.08);
-        background:rgba(0,0,0,.2); flex-shrink:0; margin:-18px -20px 14px;
+        background:rgba(0,0,0,.25); flex-shrink:0; margin:-16px -20px 12px;
       }
       .tm-tab {
-        flex:1; padding:10px 4px; text-align:center; font-size:11px; font-weight:600;
+        flex:1; padding:10px 2px; text-align:center; font-size:10.5px; font-weight:600;
         color:rgba(255,255,255,.45); cursor:pointer; border-bottom:2px solid transparent;
-        transition:all .15s; letter-spacing:.4px; text-transform:uppercase; user-select:none;
+        transition:all .15s; letter-spacing:.3px; text-transform:uppercase; user-select:none;
       }
-      .tm-tab:hover { color:rgba(255,255,255,.75); }
-      .tm-tab.active { color:#2563EB; border-bottom-color:#7C3AED; }
+      .tm-tab:hover { color:rgba(255,255,255,.8); }
+      .tm-tab.active { color:#38BDF8; border-bottom-color:#7C3AED; }
 
-      .tm-section { display:none; flex-direction:column; gap:14px; }
+      .tm-section { display:none; flex-direction:column; gap:10px; }
       .tm-section.active { display:flex; }
 
-      /* Product Info UI */
       .tm-product-card {
         background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.07);
-        border-radius:12px; padding:14px;
+        border-radius:12px; padding:12px;
       }
-      .tm-product-title { font-size:14px; font-weight:700; color:#fff; margin-bottom:10px; line-height:1.4; }
-      .tm-product-row { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px; }
-      .tm-product-label { font-size:11px; color:rgba(255,255,255,.5); text-transform:uppercase; font-weight:600; }
-      .tm-product-sku { font-size:12px; color:rgba(255,255,255,.8); font-family:monospace; }
-      .tm-product-price { font-size:18px; font-weight:800; color:#6EE7B7; }
-      .tm-empty-state { text-align:center; color:rgba(255,255,255,.3); font-size:12px; padding:20px 0; }
-      .tm-qty-wrap { display:flex; gap:8px; margin-top:12px; align-items:center; }
-      .tm-qty-wrap input { width:60px; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.15); color:#fff; text-align:center; border-radius:8px; padding:8px; font-weight:600; }
+      .tm-product-title { font-size:13.5px; font-weight:700; color:#fff; margin-bottom:8px; line-height:1.4; }
+      .tm-product-row { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:4px; }
+      .tm-product-label { font-size:10.5px; color:rgba(255,255,255,.5); text-transform:uppercase; font-weight:600; }
+      .tm-product-sku { font-size:11.5px; color:rgba(255,255,255,.8); font-family:monospace; }
+      .tm-product-price { font-size:17px; font-weight:800; color:#6EE7B7; }
+      .tm-empty-state { text-align:center; color:rgba(255,255,255,.3); font-size:11.5px; padding:16px 0; }
+
+      .tm-qty-wrap { display:flex; gap:8px; margin-top:10px; align-items:center; }
+      .tm-qty-wrap input { width:56px; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.15); color:#fff; text-align:center; border-radius:8px; padding:8px; font-weight:600; }
       .tm-btn-cart { background:linear-gradient(135deg,#D97706,#F59E0B); color:#fff; flex:1; padding:9px; border-radius:8px; border:none; cursor:pointer; font-weight:700; display:flex; align-items:center; justify-content:center; gap:6px; box-shadow:0 4px 12px rgba(217,119,6,.3); transition:transform .2s; }
       .tm-btn-cart:hover { transform:translateY(-1px); box-shadow:0 6px 16px rgba(217,119,6,.4); }
       .tm-btn-stop { background:linear-gradient(135deg,#DC2626,#EF4444); color:#fff; flex:1; padding:9px; border-radius:8px; border:none; cursor:pointer; font-weight:700; display:flex; align-items:center; justify-content:center; gap:6px; box-shadow:0 4px 12px rgba(220,38,38,.3); transition:transform .2s; }
       .tm-btn-stop:hover { transform:translateY(-1px); box-shadow:0 6px 16px rgba(220,38,38,.4); }
 
-      /* ── Activity Log (Terminal) ── */
       .tm-activity-log {
-        background: rgba(0,0,0,.4); border-radius: 8px;
-        padding: 12px; font-family: monospace; font-size: 11px;
-        max-height: 120px; overflow-y: auto; color: #A7F3D0;
-        display: flex; flex-direction: column; gap: 4px;
-        margin: 12px 20px;
-        border: 1px solid rgba(255,255,255,0.05);
+        background: rgba(0,0,0,.45); border-radius: 8px;
+        padding: 10px 12px; font-family: monospace; font-size: 10.5px;
+        max-height: 85px; overflow-y: auto; color: #A7F3D0;
+        display: flex; flex-direction: column; gap: 3px;
+        margin: 8px 20px; border: 1px solid rgba(255,255,255,0.05);
       }
       .tm-activity-log::-webkit-scrollbar { width: 4px; }
       .tm-activity-log::-webkit-scrollbar-thumb { background: rgba(255,255,255,.15); border-radius: 4px; }
-      .tm-log-item { display: flex; gap: 8px; line-height: 1.4; animation: tm-fadeIn 0.3s ease; }
+      .tm-log-item { display: flex; gap: 6px; line-height: 1.35; animation: tm-fadeIn 0.25s ease; }
       .tm-log-time { color: rgba(255,255,255,.3); flex-shrink: 0; }
       .tm-log-msg { color: rgba(255,255,255,.7); word-break: break-word; }
       .tm-log-item.info .tm-log-msg { color: #93C5FD; }
@@ -303,36 +719,20 @@
   }
 
   /* ─────────────────────────────────────────────
-     SVG HELPERS
+     SVG ICONS
   ───────────────────────────────────────────── */
-  const mkSvg = (d, w = 16, h = 16) =>
+  const mkSvg = (d, w = 15, h = 15) =>
     `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
 
   const ICON_MAIL = mkSvg('<rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>');
   const ICON_LOCK = mkSvg('<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>');
   const ICON_EYE = mkSvg('<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>');
-  const ICON_EYEOFF = mkSvg('<path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/>');
-  const ICON_USER = mkSvg('<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>');
   const ICON_CLOSE = mkSvg('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>');
-  const ICON_KEY = mkSvg('<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/>');
   const ICON_SAVE = mkSvg('<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>');
   const ICON_CART = mkSvg('<circle cx="8" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57l1.65-7.43H5.12"/>');
   const ICON_STOP = mkSvg('<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>');
 
-  /* ─────────────────────────────────────────────
-     UTILITY
-  ───────────────────────────────────────────── */
-  let botRunning = false;
-  let botLoopTimeout = null;
-
-  const escAttr = s => String(s).replace(/"/g, '&quot;').replace(/</g, '&lt;');
-
-  function nativeSet(el, value) {
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-    setter.call(el, value);
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-  }
+  const escAttr = s => String(s || '').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 
   /* ─────────────────────────────────────────────
      STATUS & LOGGING
@@ -362,6 +762,7 @@
   }
 
   function logActivity(text, type = 'info') {
+    lastActivityTimestamp = Date.now();
     const logContainer = document.getElementById('tm-activity-log');
     if (!logContainer) return;
 
@@ -375,345 +776,7 @@
   }
 
   /* ─────────────────────────────────────────────
-     BUILD PANEL
-  ───────────────────────────────────────────── */
-  function buildPanel() {
-    if (document.getElementById(PANEL_ID)) return;
-    const savedEmail = GM_getValue(STORAGE_EMAIL, '');
-    const savedPass = GM_getValue(STORAGE_PASS, '');
-    const savedCoupon = GM_getValue(STORAGE_COUPON, '');
-    const savedCcNum = GM_getValue(STORAGE_CC_NUM, '');
-    const savedCcExp = GM_getValue(STORAGE_CC_EXP, '');
-    const savedCcCvv = GM_getValue(STORAGE_CC_CVV, '');
-    const savedTargetUrl = GM_getValue(STORAGE_TARGET_URL, '');
-    const savedTargetQty = GM_getValue(STORAGE_TARGET_QTY, 1);
-    const savedPollMin = GM_getValue(STORAGE_POLL_MIN, 3);
-    const savedPollMax = GM_getValue(STORAGE_POLL_MAX, 6);
-    const savedDiscordWebhook = GM_getValue(STORAGE_DISCORD_WEBHOOK, '');
-    const savedSoundEnabled = GM_getValue(STORAGE_SOUND_ENABLED, true);
-    const savedTcgEnabled = GM_getValue(STORAGE_TCG_ENABLED, false);
-    const savedTcgUrl = GM_getValue(STORAGE_TCG_URL, 'https://toymate.com.au/search/?term=pokemon+tcg');
-    const autoBuyMonitor = GM_getValue(STORAGE_AUTO_BUY_MONITOR, false);
-    const autoEnabled = GM_getValue(STORAGE_AUTO, false);
-
-    const panel = document.createElement('div');
-    panel.id = PANEL_ID;
-    panel.innerHTML = `
-      <div class="tm-header-bar"></div>
-      <div class="tm-header">
-        <div class="tm-header-left">
-          <div class="tm-logo">🧸</div>
-          <div>
-            <div class="tm-title">Toymate Bot</div>
-            <div class="tm-subtitle">Auto Checkout & Restock</div>
-          </div>
-        </div>
-        <button class="tm-close-btn" id="tm-close-btn" title="Hide panel">${ICON_CLOSE}</button>
-      </div>
-      <div class="tm-body">
-        
-        <div class="tm-tabs" id="tm-tabs">
-          <div class="tm-tab active" data-target="tm-sec-auth">🔑 Login</div>
-          <div class="tm-tab" data-target="tm-sec-pay">💳 Pay</div>
-          <div class="tm-tab" data-target="tm-sec-bot">🎯 Bot</div>
-          <div class="tm-tab" data-target="tm-sec-alerts">📡 Alerts</div>
-          <div class="tm-tab" data-target="tm-sec-product">📦 Item</div>
-        </div>
-
-        <div id="tm-page-badge" class="tm-page-badge other">Page Detected</div>
-
-        <!-- STATUS (always visible) -->
-        <div class="tm-status info" id="tm-status" style="margin: 0 16px 6px;">
-          <div class="tm-status-dot"></div>
-          <div class="tm-status-text">
-            <div class="tm-status-title">Enter credentials and click Login</div>
-          </div>
-        </div>
-
-        <!-- LOGIN TAB -->
-        <div class="tm-section active" id="tm-sec-auth">
-          <div class="tm-field">
-            <div class="tm-label">Email</div>
-            <div class="tm-input-wrap">
-              <span class="tm-input-icon">${ICON_MAIL}</span>
-              <input id="tm-email" type="email" placeholder="you@example.com" autocomplete="email" value="${escAttr(savedEmail)}" />
-            </div>
-          </div>
-          <div class="tm-field">
-            <div class="tm-label">Password</div>
-            <div class="tm-input-wrap">
-              <span class="tm-input-icon">${ICON_LOCK}</span>
-              <input id="tm-pass" type="password" placeholder="••••••••" autocomplete="current-password" value="${escAttr(savedPass)}" />
-              <button class="tm-eye-btn" id="tm-eye-btn" title="Toggle visibility">${ICON_EYE}</button>
-            </div>
-          </div>
-          <div class="tm-toggle-row" style="margin-top:4px;">
-            <span class="tm-toggle-label">🔄&nbsp; Auto-login on page load</span>
-            <label class="tm-switch">
-              <input type="checkbox" id="tm-auto-toggle" ${autoEnabled ? 'checked' : ''} />
-              <span class="tm-switch-slider"></span>
-            </label>
-          </div>
-          <div class="tm-btn-row">
-            <button class="tm-btn tm-btn-primary" id="tm-login-btn" style="flex:1;">${ICON_KEY}&nbsp;Login Now</button>
-          </div>
-        </div>
-
-        <!-- PAY TAB -->
-        <div class="tm-section" id="tm-sec-pay">
-          <div class="tm-field">
-            <div class="tm-label">Card Number</div>
-            <div class="tm-input-wrap">
-              <span class="tm-input-icon">${ICON_CART}</span>
-              <input type="text" id="tm-cc-num" placeholder="1234 5678 1234 5678" value="${escAttr(savedCcNum)}" />
-            </div>
-          </div>
-          <div style="display:flex;gap:8px;">
-            <div class="tm-field" style="flex:1;">
-              <div class="tm-label">MM/YY</div>
-              <input type="text" id="tm-cc-exp" placeholder="MM/YY" value="${escAttr(savedCcExp)}" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:9px 12px;font-family:inherit;font-size:13px;outline:none;" />
-            </div>
-            <div class="tm-field" style="flex:1;">
-              <div class="tm-label">CVV</div>
-              <input type="text" id="tm-cc-cvv" placeholder="123" value="${escAttr(savedCcCvv)}" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:9px 12px;font-family:inherit;font-size:13px;outline:none;" />
-            </div>
-          </div>
-          <div class="tm-field" style="margin-top:4px;">
-            <div class="tm-label">Coupon Code (Optional)</div>
-            <div class="tm-input-wrap">
-              <span class="tm-input-icon">${ICON_CART}</span>
-              <input id="tm-coupon" type="text" placeholder="e.g. TOYS10" value="${escAttr(savedCoupon)}" />
-            </div>
-          </div>
-        </div>
-
-
-
-        <!-- CONFIG TAB -->
-        <div class="tm-section" id="tm-sec-bot">
-          <div class="tm-field">
-            <div class="tm-label">🎯 Target URL</div>
-            <div style="display:flex;gap:5px;align-items:center;">
-              <input type="text" id="tm-target-url" placeholder="https://toymate.com.au/..." value="${escAttr(savedTargetUrl)}" style="flex:1;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:10px;padding:8px 11px;font-family:inherit;font-size:11.5px;outline:none;" />
-              <button id="tm-clear-url-btn" title="Set to current page" style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:9px;padding:8px 10px;cursor:pointer;font-size:11px;white-space:nowrap;">📍 Here</button>
-              <button id="tm-empty-url-btn" title="Clear URL" style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:9px;padding:8px 10px;cursor:pointer;font-size:11px;white-space:nowrap;">❌</button>
-            </div>
-          </div>
-          <div class="tm-field" style="margin-top:8px;">
-            <div class="tm-label">📦 Buy Quantity <span style="opacity:.5;font-size:10px;">(for this URL)</span></div>
-            <input type="number" id="tm-target-qty" value="${savedTargetQty}" min="1" placeholder="1" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:9px 12px;font-family:inherit;font-size:13px;outline:none;" />
-          </div>
-          <div style="display:flex;gap:8px;margin-top:8px;">
-            <div class="tm-field" style="flex:1;">
-              <div class="tm-label">Min (s)</div>
-              <input type="number" id="tm-poll-min" value="${savedPollMin}" min="1" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:9px 12px;font-family:inherit;font-size:13px;outline:none;" />
-            </div>
-            <div class="tm-field" style="flex:1;">
-              <div class="tm-label">Max (s)</div>
-              <input type="number" id="tm-poll-max" value="${savedPollMax}" min="1" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:9px 12px;font-family:inherit;font-size:13px;outline:none;" />
-            </div>
-          </div>
-          <div class="tm-toggle-row" style="margin-top:8px;">
-            <span class="tm-toggle-label">⚡&nbsp; Auto-Buy Monitor Restocks</span>
-            <label class="tm-switch">
-              <input type="checkbox" id="tm-autobuy-monitor-toggle" ${autoBuyMonitor ? 'checked' : ''} />
-              <span class="tm-switch-slider"></span>
-            </label>
-          </div>
-        </div>
-
-        <!-- ALERTS TAB -->
-        <div class="tm-section" id="tm-sec-alerts">
-          <div class="tm-field">
-            <div class="tm-label">🔔 Discord Webhook URL</div>
-            <input type="text" id="tm-discord-webhook" placeholder="https://discord.com/api/webhooks/..." value="${escAttr(savedDiscordWebhook)}" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:10px;padding:8px 11px;font-family:inherit;font-size:11px;outline:none;" />
-          </div>
-          <div class="tm-toggle-row" style="margin-top:4px;">
-            <span class="tm-toggle-label">🔔&nbsp; Notification Sounds</span>
-            <label class="tm-switch">
-              <input type="checkbox" id="tm-sound-toggle" ${savedSoundEnabled ? 'checked' : ''} />
-              <span class="tm-switch-slider"></span>
-            </label>
-          </div>
-          <div class="tm-toggle-row">
-            <span class="tm-toggle-label">🃏&nbsp; TCG Release Alerts</span>
-            <label class="tm-switch">
-              <input type="checkbox" id="tm-tcg-toggle" ${savedTcgEnabled ? 'checked' : ''} />
-              <span class="tm-switch-slider"></span>
-            </label>
-          </div>
-          <div class="tm-field" id="tm-tcg-url-row" style="${savedTcgEnabled ? '' : 'opacity:.45;'}">
-            <div class="tm-label">🃏 TCG Search URL</div>
-            <input type="text" id="tm-tcg-url" value="${escAttr(savedTcgUrl)}" placeholder="https://toymate.com.au/..." style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:10px;padding:8px 11px;font-family:inherit;font-size:10.5px;outline:none;" />
-          </div>
-        </div>
-
-        <!-- PRODUCT TAB -->
-        <div class="tm-section" id="tm-sec-product">
-          <div id="tm-product-container">
-            <div class="tm-empty-state">Waiting for a product page...</div>
-          </div>
-        </div>
-
-      </div>
-      <div class="tm-divider"></div>
-
-      <!-- Activity Log -->
-      <div class="tm-activity-log" id="tm-activity-log" style="max-height:60px;">
-        <div class="tm-log-item info"><span class="tm-log-time">[${new Date().toLocaleTimeString('en-US', { hour12: false })}]</span><span class="tm-log-msg">Bot initialized. UI ready.</span></div>
-      </div>
-
-      <!-- Global Actions -->
-      <div class="tm-global-actions" style="padding:8px 16px 12px;">
-        <div class="tm-btn-row" style="margin-bottom:8px;gap:6px;">
-          <button class="tm-btn tm-btn-secondary" id="tm-save-btn" style="flex:1;padding:9px;font-size:12.5px;">${ICON_SAVE}&nbsp;Save</button>
-          <button class="tm-btn tm-btn-primary" id="tm-login-btn-2" onclick="document.getElementById('tm-login-btn').click()" style="flex:1;padding:9px;font-size:12.5px;">${ICON_KEY}&nbsp;Login</button>
-          <button class="tm-btn tm-btn-secondary" id="tm-monitor-page-btn" style="flex:1;padding:9px;font-size:12.5px;background:linear-gradient(135deg, #06B6D4, #2563EB);color:#fff;border:none;box-shadow:0 4px 12px rgba(37,99,235,.25);" title="Monitor Target URL for stock changes">🔎 Monitor</button>
-        </div>
-        <div class="tm-qty-wrap" style="margin-top:0;gap:6px;">
-          <input type="number" id="tm-qty-input" value="1" min="1" title="Qty" style="width:52px;" />
-          <button class="tm-btn-cart" id="tm-start-bot-btn">${ICON_CART} Start Bot</button>
-          <button class="tm-btn-stop" id="tm-stop-bot-btn" style="display:none;">${ICON_STOP} Stop</button>
-        </div>
-      </div>
-      <div class="tm-footer" style="padding:4px 16px 10px;font-size:10px;">🔒 Stored locally · never transmitted</div>
-    `;
-    document.body.appendChild(panel);
-
-    /* Wire events */
-    document.getElementById('tm-close-btn').addEventListener('click', () => {
-      document.getElementById(PANEL_ID).classList.add('tm-hidden');
-    });
-    document.getElementById('tm-save-btn').onclick = saveCredentials;
-    document.getElementById('tm-login-btn').onclick = loginNow;
-    document.getElementById('tm-start-bot-btn').addEventListener('click', startBot);
-    document.getElementById('tm-stop-bot-btn').addEventListener('click', stopBot);
-    document.getElementById('tm-monitor-page-btn').addEventListener('click', togglePageMonitor);
-    document.getElementById('tm-auto-toggle').onchange = e => GM_setValue(STORAGE_AUTO, e.target.checked);
-    document.getElementById('tm-sound-toggle').onchange = e => GM_setValue(STORAGE_SOUND_ENABLED, e.target.checked);
-    document.getElementById('tm-autobuy-monitor-toggle').onchange = e => GM_setValue(STORAGE_AUTO_BUY_MONITOR, e.target.checked);
-    document.getElementById('tm-tcg-toggle').onchange = e => {
-      GM_setValue(STORAGE_TCG_ENABLED, e.target.checked);
-      const row = document.getElementById('tm-tcg-url-row');
-      if (row) row.style.opacity = e.target.checked ? '1' : '0.45';
-      if (e.target.checked) {
-        const url = document.getElementById('tm-tcg-url')?.value.trim();
-        if (url) startTcgMonitor(url);
-      } else {
-        stopTcgMonitor();
-      }
-    };
-    document.getElementById('tm-clear-url-btn').onclick = () => {
-      const urlInput = document.getElementById('tm-target-url');
-      urlInput.value = window.location.href.split('?')[0];
-      GM_setValue(STORAGE_TARGET_URL, urlInput.value);
-      showToast('Target URL set to current page!', 'success');
-    };
-    document.getElementById('tm-empty-url-btn').onclick = () => {
-      const urlInput = document.getElementById('tm-target-url');
-      urlInput.value = '';
-      GM_setValue(STORAGE_TARGET_URL, '');
-      showToast('Target URL cleared!', 'success');
-    };
-
-    document.querySelectorAll('.tm-tab').forEach(tab => {
-      tab.addEventListener('click', (e) => {
-        document.querySelectorAll('.tm-tab').forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('.tm-section').forEach(s => s.classList.remove('active'));
-        e.target.classList.add('active');
-        const targetId = e.target.getAttribute('data-target');
-        document.getElementById(targetId).classList.add('active');
-      });
-    });
-
-    /* Eye toggle */
-    let showing = false;
-    document.getElementById('tm-eye-btn').onclick = () => {
-      showing = !showing;
-      document.getElementById('tm-pass').type = showing ? 'text' : 'password';
-      document.getElementById('tm-eye-btn').innerHTML = showing ? ICON_EYEOFF : ICON_EYE;
-    };
-  }
-
-  /* ─────────────────────────────────────────────
-     TOGGLE BUBBLE
-  ───────────────────────────────────────────── */
-  function buildToggleBubble() {
-    if (document.getElementById('tm-toggle-bubble')) return;
-    const bubble = document.createElement('div');
-    bubble.id = 'tm-toggle-bubble';
-    bubble.title = 'Toymate Bot - Auto Checkout & Restock';
-    bubble.innerHTML = mkSvg(
-      '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
-      22, 22
-    ).replace('stroke="currentColor"', 'stroke="white"');
-    bubble.onclick = () => {
-      buildPanel();
-      const p = document.getElementById(PANEL_ID);
-      if (p) p.classList.toggle('tm-hidden');
-    };
-    document.body.appendChild(bubble);
-  }
-
-  /* ─────────────────────────────────────────────
-     CREDENTIALS
-  ───────────────────────────────────────────── */
-  function saveCredentials() {
-    const email = document.getElementById('tm-email')?.value.trim() || '';
-    const pass = document.getElementById('tm-pass')?.value || '';
-    const coupon = document.getElementById('tm-coupon')?.value.trim() || '';
-    const ccNum = document.getElementById('tm-cc-num')?.value.trim() || '';
-    const ccExp = document.getElementById('tm-cc-exp')?.value.trim() || '';
-    const ccCvv = document.getElementById('tm-cc-cvv')?.value.trim() || '';
-    const targetUrl = document.getElementById('tm-target-url')?.value.trim() || '';
-    const targetQty = parseInt(document.getElementById('tm-target-qty')?.value) || 1;
-    const pollMin = parseInt(document.getElementById('tm-poll-min')?.value) || 3;
-    const pollMax = Math.max(pollMin, parseInt(document.getElementById('tm-poll-max')?.value) || 6);
-    const discordWebhook = document.getElementById('tm-discord-webhook')?.value.trim() || '';
-    const soundEnabled = document.getElementById('tm-sound-toggle')?.checked ?? true;
-    const autoBuyMonitor = document.getElementById('tm-autobuy-monitor-toggle')?.checked ?? false;
-    const tcgEnabled = document.getElementById('tm-tcg-toggle')?.checked ?? false;
-    const tcgUrl = document.getElementById('tm-tcg-url')?.value.trim() || 'https://toymate.com.au/search/?term=pokemon+tcg';
-    
-    GM_setValue(STORAGE_EMAIL, email);
-    GM_setValue(STORAGE_PASS, pass);
-    GM_setValue(STORAGE_COUPON, coupon);
-    GM_setValue(STORAGE_CC_NUM, ccNum);
-    GM_setValue(STORAGE_CC_EXP, ccExp);
-    GM_setValue(STORAGE_CC_CVV, ccCvv);
-    GM_setValue(STORAGE_TARGET_URL, targetUrl);
-    GM_setValue(STORAGE_TARGET_QTY, targetQty);
-    GM_setValue(STORAGE_POLL_MIN, pollMin);
-    GM_setValue(STORAGE_POLL_MAX, pollMax);
-    GM_setValue(STORAGE_DISCORD_WEBHOOK, discordWebhook);
-    GM_setValue(STORAGE_SOUND_ENABLED, soundEnabled);
-    GM_setValue(STORAGE_AUTO_BUY_MONITOR, autoBuyMonitor);
-    GM_setValue(STORAGE_TCG_ENABLED, tcgEnabled);
-    GM_setValue(STORAGE_TCG_URL, tcgUrl);
-    
-    if (!email || !pass) {
-      setStatus('success', 'Saved', 'Data saved (Login empty)');
-      showToast('Saved (Email/Pass empty)', 'success');
-      logActivity('Saved data, but email/password are empty. Auto-login will be skipped.', 'warn');
-    } else {
-      setStatus('success', 'Saved', 'Credentials stored.');
-      showToast('Credentials saved locally!', 'success');
-      logActivity('Credentials saved to secure storage.', 'success');
-      setTimeout(() => setStatus('info', 'Ready', 'Waiting...'), 2500);
-    }
-  }
-
-  function getCredentials() {
-    const ei = document.getElementById('tm-email');
-    const pi = document.getElementById('tm-pass');
-    return {
-      email: ei ? ei.value.trim() : GM_getValue(STORAGE_EMAIL, ''),
-      pass: pi ? pi.value : GM_getValue(STORAGE_PASS, '')
-    };
-  }
-
-  /* ─────────────────────────────────────────────
-     NOTIFICATION SOUNDS
+     NOTIFICATION SOUNDS & DISCORD
   ───────────────────────────────────────────── */
   function playSound(type) {
     if (!GM_getValue(STORAGE_SOUND_ENABLED, true)) return;
@@ -740,20 +803,17 @@
     } catch(e) { /* audio not supported */ }
   }
 
-  /* ─────────────────────────────────────────────
-     DISCORD WEBHOOK NOTIFICATION
-  ───────────────────────────────────────────── */
   function sendDiscordNotification(title, description, color = 3066993) {
     const webhookUrl = GM_getValue(STORAGE_DISCORD_WEBHOOK, '').trim();
     if (!webhookUrl) return;
     const payload = {
-      username: '🧸 Toymate Bot',
+      username: '🧸 Toymate Bot v2',
       embeds: [{
         title,
         description,
         color,
         timestamp: new Date().toISOString(),
-        footer: { text: 'Toymate Auto Checkout & Restock Monitor' }
+        footer: { text: 'Toymate Auto Checkout & Flash Monitor v2.0' }
       }]
     };
     GM_xmlhttpRequest({
@@ -761,208 +821,327 @@
       url: webhookUrl,
       headers: { 'Content-Type': 'application/json' },
       data: JSON.stringify(payload),
-      onerror: () => logActivity('Discord notification failed.', 'warn')
+      onerror: () => logActivity('Discord notification failed to deliver.', 'warn')
     });
   }
 
   /* ─────────────────────────────────────────────
-     FIND PROFILE / LOGOUT LINK
+     REQUEST JITTERING & CACHE-BUSTING
   ───────────────────────────────────────────── */
-  function findProfileLink() {
-    const a = document.querySelector('a[aria-label="Profile"][href*="/login"]');
-    if (a) return a;
-    for (const link of document.querySelectorAll('a[href*="/login"]')) {
-      if (link.querySelector('svg')) return link;
+  function getJitteredHeaders() {
+    const baseHeaders = {
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'Accept-Language': 'en-AU,en-US;q=0.9,en;q=0.8'
+    };
+    if (Math.random() > 0.3) {
+      baseHeaders['Cache-Control'] = 'no-cache, no-store, must-revalidate';
     }
-    return null;
+    if (Math.random() > 0.5) {
+      baseHeaders['Pragma'] = 'no-cache';
+    }
+    return baseHeaders;
+  }
+
+  function getJitteredUrl(rawUrl) {
+    const paramKey = ['_t', '_cb', '_r', 'v'][Math.floor(Math.random() * 4)];
+    const sep = rawUrl.includes('?') ? '&' : '?';
+    return rawUrl + sep + paramKey + '=' + Date.now();
   }
 
   /* ─────────────────────────────────────────────
-     HUMAN-LIKE TYPING
-     Simulates real keypresses character-by-character
-     with random delays so React state updates properly.
+     BUILD PANEL UI
   ───────────────────────────────────────────── */
+  function buildPanel() {
+    if (document.getElementById(PANEL_ID)) return;
 
-  /** Return a random int in [min, max] */
-  function randDelay(min, max) {
-    return Math.floor(Math.random() * (max - min + 1)) + min;
-  }
+    const savedEmail = GM_getValue(STORAGE_EMAIL, '');
+    const savedPass = GM_getValue(STORAGE_PASS, '');
+    const savedCoupon = GM_getValue(STORAGE_COUPON, '');
+    const savedCcNum = GM_getValue(STORAGE_CC_NUM, '');
+    const savedCcExp = GM_getValue(STORAGE_CC_EXP, '');
+    const savedCcCvv = GM_getValue(STORAGE_CC_CVV, '');
+    const savedTargetUrl = GM_getValue(STORAGE_TARGET_URL, '');
+    const savedTargetQty = GM_getValue(STORAGE_TARGET_QTY, 1);
+    const savedPollMin = GM_getValue(STORAGE_POLL_MIN, 3);
+    const savedPollMax = GM_getValue(STORAGE_POLL_MAX, 6);
+    const savedDiscordWebhook = GM_getValue(STORAGE_DISCORD_WEBHOOK, '');
+    const savedSoundEnabled = GM_getValue(STORAGE_SOUND_ENABLED, true);
+    const savedTcgEnabled = GM_getValue(STORAGE_TCG_ENABLED, false);
+    const savedTcgUrl = GM_getValue(STORAGE_TCG_URL, 'https://toymate.com.au/search/?term=pokemon+tcg');
+    const autoBuyMonitor = GM_getValue(STORAGE_AUTO_BUY_MONITOR, false);
+    const savedPersonality = GM_getValue(STORAGE_PERSONALITY, 'normal');
 
-  /**
-   * Focus + click the input, then type each character
-   * one at a time with keydown → keypress → input → keyup events.
-   * Returns a Promise that resolves when typing is complete.
-   */
-  function humanType(el, text) {
-    return new Promise(resolve => {
-      /* Bring field into focus the way a user would */
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      el.focus();
-      el.click();
+    const panel = document.createElement('div');
+    panel.id = PANEL_ID;
+    panel.className = 'tm-hidden';
+    panel.innerHTML = `
+      <div class="tm-header-bar"></div>
+      <div class="tm-header">
+        <div class="tm-title-group">
+          <div class="tm-icon-wrap">🧸</div>
+          <div>
+            <div class="tm-title">Toymate Sniper v2.0</div>
+            <div class="tm-subtitle">Human Emulation & Flash Restock</div>
+          </div>
+        </div>
+        <button class="tm-close-btn" id="tm-close-btn">${ICON_CLOSE}</button>
+      </div>
 
-      /* Clear any existing value first */
-      const nativeSetter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype, 'value'
-      ).set;
-      nativeSetter.call(el, '');
-      el.dispatchEvent(new Event('input', { bubbles: true }));
+      <div class="tm-badge-row">
+        <span class="tm-state-badge" id="tm-bot-state-badge">IDLE</span>
+        <span class="tm-turbo-badge" id="tm-turbo-badge">⚡ TURBO FLASH MODE</span>
+      </div>
 
-      let idx = 0;
+      <div class="tm-body">
+        <div class="tm-tabs">
+          <div class="tm-tab active" data-tab="credentials">Auth</div>
+          <div class="tm-tab" data-tab="checkout">Checkout</div>
+          <div class="tm-tab" data-tab="monitor">Monitor</div>
+          <div class="tm-tab" data-tab="stealth">Stealth</div>
+          <div class="tm-tab" data-tab="alerts">Alerts</div>
+          <div class="tm-tab" data-tab="product">Product</div>
+        </div>
 
-      function typeNext() {
-        if (idx >= text.length) {
-          /* Final blur → focus cycle to trigger validation */
-          el.dispatchEvent(new Event('blur', { bubbles: true }));
-          setTimeout(resolve, randDelay(120, 250));
-          return;
-        }
+        <div id="tm-page-badge-container">
+          <span class="tm-page-badge other" id="tm-page-badge">Detecting...</span>
+        </div>
 
-        const char = text[idx++];
-        const keyCode = char.charCodeAt(0);
+        <div class="tm-status info" id="tm-status">
+          <div class="tm-status-dot"></div>
+          <div class="tm-status-text">
+            <div class="tm-status-title">System Ready</div>
+            <div class="tm-status-desc">Waiting for trigger or action.</div>
+          </div>
+        </div>
 
-        const keyInit = {
-          key: char, code: 'Key' + char.toUpperCase(),
-          keyCode, charCode: keyCode, which: keyCode,
-          bubbles: true, cancelable: true
-        };
+        <!-- AUTH TAB -->
+        <div class="tm-section active" id="tm-sec-credentials">
+          <div class="tm-field">
+            <div class="tm-label">Email</div>
+            <div class="tm-input-wrap">
+              <span class="tm-input-icon">${ICON_MAIL}</span>
+              <input class="tm-input" type="email" id="tm-email" placeholder="you@example.com" value="${escAttr(savedEmail)}" />
+            </div>
+          </div>
+          <div class="tm-field">
+            <div class="tm-label">Password</div>
+            <div class="tm-input-wrap">
+              <span class="tm-input-icon">${ICON_LOCK}</span>
+              <input class="tm-input" type="password" id="tm-pass" placeholder="••••••••" value="${escAttr(savedPass)}" />
+              <button class="tm-input-btn" id="tm-toggle-pass" type="button">${ICON_EYE}</button>
+            </div>
+          </div>
+          <div class="tm-toggle-row">
+            <span class="tm-toggle-label">⚡ Auto-Login / Auto-Flow</span>
+            <label class="tm-switch">
+              <input type="checkbox" id="tm-auto-toggle" ${GM_getValue(STORAGE_AUTO, false) ? 'checked' : ''} />
+              <span class="tm-switch-slider"></span>
+            </label>
+          </div>
+        </div>
 
-        el.dispatchEvent(new KeyboardEvent('keydown', keyInit));
-        el.dispatchEvent(new KeyboardEvent('keypress', keyInit));
+        <!-- CHECKOUT TAB -->
+        <div class="tm-section" id="tm-sec-checkout">
+          <div class="tm-field">
+            <div class="tm-label">Promo / Coupon Code</div>
+            <input type="text" id="tm-coupon" value="${escAttr(savedCoupon)}" placeholder="e.g. TOY10" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:8px 12px;font-family:inherit;font-size:12.5px;outline:none;" />
+          </div>
+          <div class="tm-field">
+            <div class="tm-label">Credit Card Number</div>
+            <input type="password" id="tm-cc-num" value="${escAttr(savedCcNum)}" placeholder="•••• •••• •••• ••••" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:8px 12px;font-family:inherit;font-size:12.5px;outline:none;" />
+          </div>
+          <div style="display:flex;gap:8px;">
+            <div class="tm-field" style="flex:1;">
+              <div class="tm-label">Expiry (MM/YY)</div>
+              <input type="text" id="tm-cc-exp" value="${escAttr(savedCcExp)}" placeholder="MM/YY" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:8px 12px;font-family:inherit;font-size:12.5px;outline:none;" />
+            </div>
+            <div class="tm-field" style="flex:1;">
+              <div class="tm-label">CVV</div>
+              <input type="password" id="tm-cc-cvv" value="${escAttr(savedCcCvv)}" placeholder="•••" maxlength="4" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:8px 12px;font-family:inherit;font-size:12.5px;outline:none;" />
+            </div>
+          </div>
+        </div>
 
-        /* Append char to the real value via native setter */
-        nativeSetter.call(el, el.value + char);
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
+        <!-- MONITOR TAB -->
+        <div class="tm-section" id="tm-sec-monitor">
+          <div class="tm-field">
+            <div class="tm-label">🎯 Target Product URL</div>
+            <input type="text" id="tm-target-url" value="${escAttr(savedTargetUrl)}" placeholder="https://toymate.com.au/product/..." style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:8px 12px;font-family:inherit;font-size:11.5px;outline:none;" />
+          </div>
+          <div style="display:flex;gap:8px;">
+            <div class="tm-field" style="flex:1;">
+              <div class="tm-label">Buy Qty</div>
+              <input type="number" id="tm-target-qty" value="${savedTargetQty}" min="1" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:8px 12px;font-family:inherit;font-size:12.5px;outline:none;" />
+            </div>
+            <div class="tm-field" style="flex:1;">
+              <div class="tm-label">Min Poll (s)</div>
+              <input type="number" id="tm-poll-min" value="${savedPollMin}" min="1" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:8px 12px;font-family:inherit;font-size:12.5px;outline:none;" />
+            </div>
+            <div class="tm-field" style="flex:1;">
+              <div class="tm-label">Max Poll (s)</div>
+              <input type="number" id="tm-poll-max" value="${savedPollMax}" min="1" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:8px 12px;font-family:inherit;font-size:12.5px;outline:none;" />
+            </div>
+          </div>
+          <div class="tm-toggle-row">
+            <span class="tm-toggle-label">⚡ Auto-Buy Monitor Restocks</span>
+            <label class="tm-switch">
+              <input type="checkbox" id="tm-autobuy-monitor-toggle" ${autoBuyMonitor ? 'checked' : ''} />
+              <span class="tm-switch-slider"></span>
+            </label>
+          </div>
+        </div>
 
-        el.dispatchEvent(new KeyboardEvent('keyup', keyInit));
+        <!-- STEALTH TAB -->
+        <div class="tm-section" id="tm-sec-stealth">
+          <div class="tm-field">
+            <div class="tm-label">🎭 Human Personality Profile</div>
+            <select class="tm-select" id="tm-personality-select">
+              <option value="cautious" ${savedPersonality === 'cautious' ? 'selected' : ''}>🛡️ Cautious (High Stealth)</option>
+              <option value="normal" ${savedPersonality === 'normal' ? 'selected' : ''}>⚖️ Normal (Balanced)</option>
+              <option value="fast_typer" ${savedPersonality === 'fast_typer' ? 'selected' : ''}>⚡ Turbo Sniper (Fastest)</option>
+            </select>
+          </div>
+          <div style="font-size:11px;color:rgba(255,255,255,.6);line-height:1.4;background:rgba(255,255,255,.03);padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.06);">
+            ✨ <b>Active Anti-Detection:</b><br/>
+            • Cubic Bezier curved mouse paths<br/>
+            • Smooth scroll with overshoot settling<br/>
+            • Keypress jitter & typo simulation<br/>
+            • Exponential backoff on cart resets
+          </div>
+        </div>
 
-        /* Random human delay: 20–50 ms per keystroke (fast typing) */
-        setTimeout(typeNext, randDelay(20, 50));
-      }
+        <!-- ALERTS TAB -->
+        <div class="tm-section" id="tm-sec-alerts">
+          <div class="tm-field">
+            <div class="tm-label">🔔 Discord Webhook URL</div>
+            <input type="text" id="tm-discord-webhook" placeholder="https://discord.com/api/webhooks/..." value="${escAttr(savedDiscordWebhook)}" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:10px;padding:8px 11px;font-family:inherit;font-size:11px;outline:none;" />
+          </div>
+          <div class="tm-toggle-row">
+            <span class="tm-toggle-label">🔔 Notification Sounds</span>
+            <label class="tm-switch">
+              <input type="checkbox" id="tm-sound-toggle" ${savedSoundEnabled ? 'checked' : ''} />
+              <span class="tm-switch-slider"></span>
+            </label>
+          </div>
+          <div class="tm-toggle-row">
+            <span class="tm-toggle-label">🃏 TCG Release Alerts</span>
+            <label class="tm-switch">
+              <input type="checkbox" id="tm-tcg-toggle" ${savedTcgEnabled ? 'checked' : ''} />
+              <span class="tm-switch-slider"></span>
+            </label>
+          </div>
+          <div class="tm-field" id="tm-tcg-url-row" style="${savedTcgEnabled ? '' : 'opacity:.45;'}">
+            <div class="tm-label">🃏 TCG Search URL</div>
+            <input type="text" id="tm-tcg-url" value="${escAttr(savedTcgUrl)}" placeholder="https://toymate.com.au/..." style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:10px;padding:8px 11px;font-family:inherit;font-size:10.5px;outline:none;" />
+          </div>
+        </div>
 
-      /* Small pause before starting to type */
-      setTimeout(typeNext, randDelay(50, 150));
+        <!-- PRODUCT TAB -->
+        <div class="tm-section" id="tm-sec-product">
+          <div id="tm-product-container">
+            <div class="tm-empty-state">Waiting for product page...</div>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="tm-divider"></div>
+
+      <!-- Activity Log -->
+      <div class="tm-activity-log" id="tm-activity-log">
+        <div class="tm-log-item info"><span class="tm-log-time">[${new Date().toLocaleTimeString('en-US', { hour12: false })}]</span><span class="tm-log-msg">Sniper v2.0.1 initialized. Stealth engine active.</span></div>
+      </div>
+
+      <!-- Global Action Bar -->
+      <div style="padding:4px 20px 10px;">
+        <div style="display:flex;gap:6px;margin-bottom:8px;">
+          <button class="tm-btn-cart" id="tm-save-btn" style="background:rgba(255,255,255,.1);flex:1;box-shadow:none;font-size:12px;">${ICON_SAVE} Save</button>
+          <button class="tm-btn-cart" id="tm-monitor-btn" style="background:linear-gradient(135deg, #06B6D4, #2563EB);flex:1.2;font-size:12px;">🔎 Monitor</button>
+        </div>
+        <div class="tm-qty-wrap" style="margin-top:0;">
+          <input type="number" id="tm-qty-input" value="${savedTargetQty}" min="1" title="Qty" />
+          <button class="tm-btn-cart" id="tm-start-bot-btn">${ICON_CART} Start Sniper</button>
+          <button class="tm-btn-stop" id="tm-stop-bot-btn" style="display:none;">${ICON_STOP} Stop</button>
+        </div>
+      </div>
+      <div class="tm-footer">🔒 Protected by Anti-Detection Bezier Engine · Toymate Bot</div>
+    `;
+
+    document.body.appendChild(panel);
+
+    panel.querySelectorAll('.tm-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        panel.querySelectorAll('.tm-tab').forEach(t => t.classList.remove('active'));
+        panel.querySelectorAll('.tm-section').forEach(s => s.classList.remove('active'));
+        tab.classList.add('active');
+        const sec = document.getElementById('tm-sec-' + tab.dataset.tab);
+        if (sec) sec.classList.add('active');
+      });
     });
-  }
 
-  /**
-   * Simulates a human clicking a button with mousedown/mouseup events and slight delay
-   */
-  function humanClick(el) {
-    return new Promise(resolve => {
-      if (!document.body.contains(el)) return resolve();
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      setTimeout(() => {
-        if (!document.body.contains(el)) return resolve();
-        el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
-        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-        el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-        el.click();
-        resolve();
-      }, randDelay(50, 150));
-    });
-  }
-
-  /* ─────────────────────────────────────────────
-     PERFORM LOGIN ON /login PAGE
-     Finds inputs by name= attribute (robust against
-     React's randomised dynamic IDs like _R_55inp…)
-  ───────────────────────────────────────────── */
-  function performLogin(email, pass) {
-    setStatus('info', 'Looking for login form…', 'Scanning the page', true);
-    logActivity('Searching for email and password fields on login page...', 'info');
-
-    const tryFill = (n = 0) => {
-      /* Prefer name= selectors — works regardless of dynamic ID */
-      const emailInp = document.querySelector('input[name="email"]')
-        || document.querySelector('input[placeholder*="Email"]')
-        || document.querySelector('input[type="email"]');
-      const passInp = document.querySelector('input[name="password"]')
-        || document.querySelector('input[type="password"]');
-
-      /* Find the 'Sign in' button specifically */
-      const submitBtn = Array.from(document.querySelectorAll('button')).find(
-        b => (b.type === 'submit' || b.getAttribute('type') === 'submit') &&
-          (b.textContent.toLowerCase().includes('sign in') || b.textContent.toLowerCase().includes('log in'))
-      ) || document.querySelector('button[type="submit"]');
-
-      if (emailInp && passInp && submitBtn) {
-        setStatus('info', 'Typing email…', 'Simulating human typing', true);
-        logActivity('Found login form. Starting human typing simulation.', 'success');
-        logActivity('Typing email address...', 'info');
-
-        humanType(emailInp, email).then(() => {
-          setStatus('info', 'Typing password…', 'Simulating human typing', true);
-          logActivity('Typing password...', 'info');
-
-          /* Natural pause between fields */
-          return new Promise(r => setTimeout(r, randDelay(300, 600)))
-            .then(() => humanType(passInp, pass));
-        }).then(() => {
-          setStatus('info', 'Submitting…', 'Wait a moment', true);
-          logActivity('Credentials entered. Waiting to click submit...', 'info');
-
-          /* Brief pause before clicking submit, like a human */
-          setTimeout(() => {
-            submitBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            submitBtn.focus();
-            setTimeout(() => {
-              submitBtn.click();
-              setStatus('success', 'Login submitted!', 'Waiting for response');
-              showToast('Login requested', 'success');
-              logActivity('Clicked "Sign in" button successfully. Login request submitted.', 'success');
-            }, randDelay(200, 500));
-          }, randDelay(400, 700));
-        });
-
-      } else if (n < 30) {
-        /* Page still hydrating — retry */
-        if (n % 10 === 0 && n > 0) logActivity('Still searching for login form elements...', 'warn');
-        setTimeout(() => tryFill(n + 1), 400);
-      } else {
-        setStatus('error', 'Login form not found', 'Could not locate form fields.');
-        showToast('Failed to find login fields', 'error');
-        logActivity('Failed to find login fields (email/password/submit) after 30 attempts.', 'error');
-      }
+    document.getElementById('tm-close-btn').onclick = () => panel.classList.add('tm-hidden');
+    document.getElementById('tm-save-btn').onclick = saveAllSettings;
+    document.getElementById('tm-start-bot-btn').onclick = startBot;
+    document.getElementById('tm-stop-bot-btn').onclick = stopBot;
+    document.getElementById('tm-monitor-btn').onclick = togglePageMonitor;
+    
+    document.getElementById('tm-toggle-pass').onclick = () => {
+      const p = document.getElementById('tm-pass');
+      p.type = p.type === 'password' ? 'text' : 'password';
     };
 
-    tryFill();
-  }
+    document.getElementById('tm-auto-toggle').onchange = e => GM_setValue(STORAGE_AUTO, e.target.checked);
+    document.getElementById('tm-sound-toggle').onchange = e => GM_setValue(STORAGE_SOUND_ENABLED, e.target.checked);
+    document.getElementById('tm-autobuy-monitor-toggle').onchange = e => GM_setValue(STORAGE_AUTO_BUY_MONITOR, e.target.checked);
+    document.getElementById('tm-personality-select').onchange = e => {
+      GM_setValue(STORAGE_PERSONALITY, e.target.value);
+      logActivity(`Personality profile switched to: ${PROFILES[e.target.value]?.name}`, 'info');
+    };
 
-  /* ─────────────────────────────────────────────
-     LOGIN NOW (button handler)
-  ───────────────────────────────────────────── */
-  function loginNow() {
-    const { email, pass } = getCredentials();
-    if (!email || !pass) {
-      setStatus('error', 'Credentials missing', 'Enter email and password first.');
-      showToast('Enter credentials first', 'warning');
-      logActivity('Cannot login: Email or password missing.', 'error');
-      return;
-    }
-
-    if (/\/login/i.test(window.location.pathname)) {
-      logActivity('Login button clicked. We are already on the login page.', 'info');
-      performLogin(email, pass);
-    } else {
-      setStatus('info', 'Navigating to login page…', 'Redirecting', true);
-      logActivity('Login button clicked. Navigating to login page...', 'info');
-      GM_setValue(STORAGE_EMAIL, email);
-      GM_setValue(STORAGE_PASS, pass);
-      const link = findProfileLink();
-      if (link) {
-        logActivity('Found profile/logout link. Clicking it to navigate.', 'success');
-        link.click();
+    document.getElementById('tm-tcg-toggle').onchange = e => {
+      GM_setValue(STORAGE_TCG_ENABLED, e.target.checked);
+      const row = document.getElementById('tm-tcg-url-row');
+      if (row) row.style.opacity = e.target.checked ? '1' : '0.45';
+      if (e.target.checked) {
+        const url = document.getElementById('tm-tcg-url')?.value.trim();
+        startTcgMonitor(url);
       } else {
-        logActivity('Could not find profile link. Falling back to direct URL navigation.', 'warn');
-        window.location.href = 'https://toymate.com.au/login/';
+        stopTcgMonitor();
       }
-    }
+    };
   }
 
-  /* ─────────────────────────────────────────────
-     SET PAGE BADGE
-  ───────────────────────────────────────────── */
+  function buildToggleBubble() {
+    if (document.getElementById('tm-toggle-bubble')) return;
+    const bubble = document.createElement('button');
+    bubble.id = 'tm-toggle-bubble';
+    bubble.title = 'Toymate Bot v2';
+    bubble.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><circle cx="8" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57l1.65-7.43H5.12"/></svg>`;
+    bubble.onclick = () => {
+      buildPanel();
+      const p = document.getElementById(PANEL_ID);
+      if (p) p.classList.toggle('tm-hidden');
+    };
+    document.body.appendChild(bubble);
+  }
+
+  function saveAllSettings() {
+    GM_setValue(STORAGE_EMAIL, document.getElementById('tm-email')?.value.trim() || '');
+    GM_setValue(STORAGE_PASS, document.getElementById('tm-pass')?.value || '');
+    GM_setValue(STORAGE_COUPON, document.getElementById('tm-coupon')?.value.trim() || '');
+    GM_setValue(STORAGE_CC_NUM, document.getElementById('tm-cc-num')?.value.trim() || '');
+    GM_setValue(STORAGE_CC_EXP, document.getElementById('tm-cc-exp')?.value.trim() || '');
+    GM_setValue(STORAGE_CC_CVV, document.getElementById('tm-cc-cvv')?.value.trim() || '');
+    GM_setValue(STORAGE_TARGET_URL, document.getElementById('tm-target-url')?.value.trim() || '');
+    GM_setValue(STORAGE_TARGET_QTY, parseInt(document.getElementById('tm-target-qty')?.value) || 1);
+    GM_setValue(STORAGE_POLL_MIN, parseInt(document.getElementById('tm-poll-min')?.value) || 3);
+    GM_setValue(STORAGE_POLL_MAX, parseInt(document.getElementById('tm-poll-max')?.value) || 6);
+    GM_setValue(STORAGE_DISCORD_WEBHOOK, document.getElementById('tm-discord-webhook')?.value.trim() || '');
+    GM_setValue(STORAGE_TCG_URL, document.getElementById('tm-tcg-url')?.value.trim() || '');
+    showToast('All settings saved!', 'success');
+    logActivity('All settings saved to secure local storage.', 'success');
+  }
+
   function setPageBadge(type, label) {
     const b = document.getElementById('tm-page-badge');
     if (b) {
@@ -972,425 +1151,96 @@
   }
 
   /* ─────────────────────────────────────────────
-     HOME PAGE CHECK
+     WATCHDOG TIMER (Auto Recovery)
   ───────────────────────────────────────────── */
-  function checkHomePage() {
-    setPageBadge('home', 'Homepage');
-    
-    const loggedInLink = document.querySelector('a[href*="/account/settings/"]');
-    if (loggedInLink) {
-      buildPanel();
-      document.getElementById(PANEL_ID).classList.remove('tm-hidden');
-      setStatus('success', 'Logged In', 'Account is ready');
-      logActivity('User is already logged in! Auto-login skipped.', 'success');
-      return;
-    }
-    
-    const profileLink = findProfileLink();
-    if (!profileLink) {
-      logActivity('Could not detect login state. (No profile links found)', 'warn');
-      return;
-    }
-
-    logActivity('Home page detected. User is currently logged out.', 'info');
-
-    const autoEnabled = GM_getValue(STORAGE_AUTO, false);
-    const savedEmail = GM_getValue(STORAGE_EMAIL, '');
-    const savedPass = GM_getValue(STORAGE_PASS, '');
-
-    if (autoEnabled && savedEmail && savedPass) {
-      buildPanel();
-      setStatus('info', 'Logged out detected', 'Navigating to login…', true);
-      logActivity('Auto-login is enabled and credentials found. Navigating to login page...', 'success');
-      setTimeout(() => profileLink.click(), 1200);
-    } else {
-      buildPanel();
-      document.getElementById(PANEL_ID).classList.remove('tm-hidden');
-      setStatus('warn', 'Not logged in', 'Enter credentials and click Login.');
-      logActivity('Auto-login is disabled or credentials missing. Waiting for user input.', 'warn');
-    }
+  function startWatchdog() {
+    if (watchdogInterval) clearInterval(watchdogInterval);
+    watchdogInterval = setInterval(() => {
+      if (!botRunning) return;
+      const idleTime = Date.now() - lastActivityTimestamp;
+      if (idleTime > 25000) {
+        logActivity('⚠️ Watchdog: No activity for 25s. Recovering current state...', 'warn');
+        if (window.location.pathname.includes('/cart/')) {
+          checkCartPage();
+        } else if (window.location.pathname.includes('/checkout/') || window.location.hostname.includes('checkout.')) {
+          checkCheckoutPage();
+        } else {
+          runBuyLoop();
+        }
+      }
+    }, 10000);
   }
 
   /* ─────────────────────────────────────────────
-     LOGIN PAGE CHECK
+     TURBO FLASH RESTOCK MODE TRIGGER
   ───────────────────────────────────────────── */
-  function checkLoginPage() {
-    const autoEnabled = GM_getValue(STORAGE_AUTO, false);
-    const savedEmail = GM_getValue(STORAGE_EMAIL, '');
-    const savedPass = GM_getValue(STORAGE_PASS, '');
+  function triggerTurboMode(durationSec = 90) {
+    turboModeExpiresAt = Date.now() + durationSec * 1000;
+    const turboBadge = document.getElementById('tm-turbo-badge');
+    if (turboBadge) turboBadge.style.display = 'inline-block';
+    logActivity(`🔥 TURBO FLASH MODE ACTIVATED for ${durationSec}s! (Fast 300-600ms polling)`, 'warn');
+    playSound('info');
+  }
 
-    buildPanel();
-    setPageBadge('login', 'Login Page');
-    logActivity('Login page detected.', 'info');
-
-    if (autoEnabled && savedEmail && savedPass) {
-      setStatus('info', 'Auto-login enabled', 'Filling form…', true);
-      logActivity('Auto-login enabled. Preparing to fill credentials...', 'success');
-      setTimeout(() => performLogin(savedEmail, savedPass), 800);
-    } else {
-      setStatus('info', 'Login page ready', 'Click "Login Now" to sign in.');
-      logActivity('Auto-login is disabled or credentials missing. Waiting for user to click Login Now.', 'warn');
-    }
+  function isTurboModeActive() {
+    const active = Date.now() < turboModeExpiresAt;
+    const turboBadge = document.getElementById('tm-turbo-badge');
+    if (turboBadge) turboBadge.style.display = active ? 'inline-block' : 'none';
+    return active;
   }
 
   /* ─────────────────────────────────────────────
-     TCG RELEASE ALERT MONITOR
-     Polls a configurable search/category URL and
-     fires Discord + sound + toast when new product
-     IDs appear that weren't in the stored snapshot.
+     PRODUCT PAGE & LIVE MUTATION OBSERVER
   ───────────────────────────────────────────── */
+  function setupLiveProductObserver() {
+    if (liveProductObserver) liveProductObserver.disconnect();
 
-  function stopTcgMonitor() {
-    if (tcgPollTimeout) { clearTimeout(tcgPollTimeout); tcgPollTimeout = null; }
-    logActivity('TCG monitor stopped.', 'warn');
-  }
+    liveProductObserver = new MutationObserver(() => {
+      if (!botRunning) return;
+      const nativeAddBtn = findAddToCartButton();
 
-  function startTcgMonitor(url) {
-    if (!url) return;
-    stopTcgMonitor(); // cancel any existing poll
-    logActivity(`TCG monitor started for: ${url}`, 'info');
-    scheduleTcgPoll(url);
-  }
-
-  function scheduleTcgPoll(url) {
-    const minDelay = GM_getValue(STORAGE_POLL_MIN, 3) * 1000;
-    const maxDelay = GM_getValue(STORAGE_POLL_MAX, 6) * 1000;
-    const delay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
-    tcgPollTimeout = setTimeout(() => doTcgPoll(url), delay);
-  }
-
-  function doTcgPoll(url) {
-    if (!GM_getValue(STORAGE_TCG_ENABLED, false)) {
-      logActivity('TCG monitor disabled, stopping.', 'warn');
-      return;
-    }
-
-    GM_xmlhttpRequest({
-      method: 'GET',
-      url: url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now(),
-      headers: {
-        'Accept': 'text/html',
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache'
-      },
-      onload: function(res) {
-        if (!GM_getValue(STORAGE_TCG_ENABLED, false)) return;
-
-        // Extract all product IDs from hidden inputs: <input name="productId" value="XXXXX">
-        const matches = res.responseText.matchAll(/name="productId"\s+value="(\d+)"/g);
-        const liveIds = new Set();
-        for (const m of matches) liveIds.add(m[1]);
-
-        if (liveIds.size === 0) {
-          // Possibly a fetch issue or page changed structure — reschedule silently
-          scheduleTcgPoll(url);
-          return;
-        }
-
-        // Load stored snapshot
-        let knownIds;
-        try { knownIds = new Set(JSON.parse(GM_getValue(STORAGE_TCG_KNOWN_IDS, '[]'))); }
-        catch(e) { knownIds = new Set(); }
-
-        if (knownIds.size === 0) {
-          // First run — just save the current list as baseline
-          GM_setValue(STORAGE_TCG_KNOWN_IDS, JSON.stringify([...liveIds]));
-          logActivity(`TCG monitor: baseline saved (${liveIds.size} products).`, 'success');
-          scheduleTcgPoll(url);
-          return;
-        }
-
-        // Find genuinely new IDs
-        const newIds = [...liveIds].filter(id => !knownIds.has(id));
-
-        if (newIds.length > 0) {
-          // Extract product names for the new IDs
-          const newProducts = [];
-          for (const id of newIds) {
-            // Try to find the aria-label of the Add to Cart button for this product
-            const labelMatch = res.responseText.match(
-              new RegExp(`aria-label="Add to cart: ([^"]+)"[^>]+>[^<]*<[^<]*<[^<]*<input[^>]+productId[^>]+value="${id}"`, 'i')
-            ) || res.responseText.match(
-              new RegExp(`name="productId"\\s+value="${id}"[^<]{0,600}?aria-label="(?:Add to cart|Out of stock): ([^"]+)"`, 'i')
-            );
-            const name = labelMatch ? labelMatch[1].replace(/^(Add to cart|Out of stock): /i, '').trim() : `Product #${id}`;
-            newProducts.push({ id, name });
-          }
-
-          // Update the snapshot with all live IDs
-          GM_setValue(STORAGE_TCG_KNOWN_IDS, JSON.stringify([...liveIds]));
-
-          // Alert for each new product
-          newProducts.forEach(p => {
-            const productUrl = `https://toymate.com.au/search/?term=pokemon+tcg`;
-            logActivity(`🃏 NEW TCG ITEM: ${p.name} (ID: ${p.id})`, 'success');
-            showToast(`🃏 New TCG: ${p.name}`, 'success', 8000);
-            playSound('stock');
-            sendDiscordNotification(
-              '🃏 NEW TCG ITEM DETECTED!',
-              `A new Pokemon TCG product appeared on Toymate!\n\n**${p.name}** (Product ID: ${p.id})\n\n🔗 [Search Page](${url})\n🔗 [Check all TCG items](https://toymate.com.au/search/?term=pokemon+tcg)`,
-              0x9B59B6 // purple
-            );
-          });
-        }
-
-        // Reschedule next poll
-        scheduleTcgPoll(url);
-      },
-      onerror: function() {
-        // Network error — reschedule silently
-        scheduleTcgPoll(url);
+      if (nativeAddBtn && currentState === BotState.MONITORING) {
+        logActivity('⚡ Live DOM MutationObserver detected Add to Cart button appearance!', 'success');
+        clearTimeout(botLoopTimeout);
+        clearTimeout(stockPollTimeout);
+        runBuyLoop();
       }
     });
+
+    liveProductObserver.observe(document.body, { childList: true, subtree: true, attributes: true });
   }
 
   /* ─────────────────────────────────────────────
-     BACKGROUND PAGE MONITOR (SEARCH/CATEGORY)
-  ───────────────────────────────────────────── */
-  function togglePageMonitor() {
-    if (pageMonitorRunning) {
-      pageMonitorRunning = false;
-      if (pageMonitorTimeout) { clearTimeout(pageMonitorTimeout); pageMonitorTimeout = null; }
-      const btn = document.getElementById('tm-monitor-page-btn');
-      if (btn) btn.innerHTML = '🔎 Monitor';
-      logActivity('Page monitor stopped.', 'warn');
-      showToast('Page Monitor Stopped', 'warning');
-      return;
-    }
-
-    let targetUrl = GM_getValue(STORAGE_TARGET_URL, '').trim();
-    if (!targetUrl) {
-      targetUrl = GM_getValue(STORAGE_TCG_URL, '').trim();
-    }
-    if (!targetUrl) {
-      showToast('Please set a Target URL in Config tab first!', 'error');
-      setStatus('error', 'No Target URL', 'Set URL in Config tab');
-      return;
-    }
-
-    pageMonitorRunning = true;
-    knownProductStatuses = {}; // Reset baseline on fresh start
-    const btn = document.getElementById('tm-monitor-page-btn');
-    if (btn) btn.innerHTML = '🛑 Stop Monitor';
-    
-    logActivity(`Starting page monitor on: ${targetUrl}`, 'info');
-    showToast('Page Monitor Started', 'info');
-    schedulePageMonitorPoll(targetUrl);
-  }
-
-  function schedulePageMonitorPoll(url) {
-    if (!pageMonitorRunning) return;
-    const uiMin = parseInt(document.getElementById('tm-poll-min')?.value);
-    const uiMax = parseInt(document.getElementById('tm-poll-max')?.value);
-    const minDelay = (uiMin > 0 ? uiMin : GM_getValue(STORAGE_POLL_MIN, 3)) * 1000;
-    const maxDelay = (Math.max((uiMax > 0 ? uiMax : GM_getValue(STORAGE_POLL_MAX, 6)), minDelay/1000)) * 1000;
-    const delay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
-    
-    // Log the next check time so the user sees the random time
-    logActivity(`Next check in ${(delay/1000).toFixed(1)}s...`, 'info');
-    
-    pageMonitorTimeout = setTimeout(() => doPageMonitorPoll(url), delay);
-  }
-
-  function doPageMonitorPoll(url) {
-    if (!pageMonitorRunning) return;
-
-    GM_xmlhttpRequest({
-      method: 'GET',
-      url: url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now(),
-      headers: {
-        'Accept': 'text/html',
-        'Cache-Control': 'no-cache, no-store, must-revalidate'
-      },
-      onload: function(res) {
-        if (!pageMonitorRunning) return;
-        
-        const doc = new DOMParser().parseFromString(res.responseText, 'text/html');
-        // Find forms that have a productId input (more reliable than form action)
-        const productForms = Array.from(doc.querySelectorAll('form')).filter(f => f.querySelector('input[name="productId"]'));
-        
-        let inStockCount = 0;
-        let outOfStockCount = 0;
-        let restockFound = false;
-
-        productForms.forEach(form => {
-          const idInput = form.querySelector('input[name="productId"]');
-          if (!idInput) return;
-          const pid = idInput.value;
-          
-          // Link and Name extraction
-          const card = form.closest('[data-product-id], .group') || form.parentElement;
-          const aTag = card ? card.querySelector('a[href*="/product/"]') : null;
-          const productLink = (aTag && aTag.getAttribute('href')) ? new URL(aTag.getAttribute('href'), window.location.origin).href : url;
-          
-          const btn = form.querySelector('button');
-          let productName = `Product #${pid}`;
-          if (btn && btn.getAttribute('aria-label')) {
-             productName = btn.getAttribute('aria-label').replace(/^(Add to cart|Out of stock):\s*/i, '').trim();
-          } else if (aTag) {
-             productName = aTag.textContent.trim() || productName;
-          }
-          
-          // Check button text for out of stock
-          const btnText = btn ? btn.textContent.toLowerCase() : '';
-          const ariaLabel = btn ? (btn.getAttribute('aria-label') || '').toLowerCase() : '';
-          const isOutOfStock = btnText.includes('out of stock') || btnText.includes('notify') || ariaLabel.includes('out of stock');
-          
-          const currentStatus = isOutOfStock ? 'out_of_stock' : 'in_stock';
-          if (currentStatus === 'in_stock') inStockCount++;
-          else outOfStockCount++;
-
-          // Compare with known baseline
-          if (knownProductStatuses[pid] === 'out_of_stock' && currentStatus === 'in_stock') {
-            logActivity(`🚀 RESTOCK DETECTED: ${productName}`, 'success');
-            showToast(`🚀 Restock: ${productName}`, 'success', 8000);
-            playSound('stock');
-            sendDiscordNotification(
-              '🚀 RESTOCK DETECTED!',
-              `A product is back in stock!\n\n**${productName}**\n\n🔗 [Buy Now](${productLink})`,
-              0x10B981 // green
-            );
-            
-            // Redirect if auto-buy is enabled
-            if (GM_getValue(STORAGE_AUTO_BUY_MONITOR, false)) {
-              logActivity(`Auto-buy enabled. Navigating to product...`, 'info');
-              setTimeout(() => { window.location.href = productLink; }, 1000);
-              restockFound = true;
-            } else {
-              logActivity(`Auto-buy disabled. Sound/Discord alert sent.`, 'warn');
-            }
-          }
-
-          knownProductStatuses[pid] = currentStatus;
-        });
-
-        if (productForms.length === 0) {
-          logActivity(`Page check: No products found on this page. Retrying...`, 'warn');
-        } else {
-          logActivity(`Checked URL: ${inStockCount} In Stock, ${outOfStockCount} Out of Stock`, 'info');
-        }
-
-        if (!restockFound) {
-          schedulePageMonitorPoll(url);
-        } else {
-          togglePageMonitor(); // Stop monitoring since we are redirecting
-        }
-      },
-      onerror: function() {
-        logActivity('Page monitor network error, retrying...', 'warn');
-        schedulePageMonitorPoll(url);
-      }
-    });
-  }
-
-  /* ─────────────────────────────────────────────
-     BACKGROUND STOCK POLLING (no page refresh)
-  ───────────────────────────────────────────── */
-  let stockPollTimeout = null;
-
-  function checkStockInBackground(url, onInStockCallback) {
-    // Clear any previous poll
-    if (stockPollTimeout) clearTimeout(stockPollTimeout);
-
-    let pollCount = 0;
-    const cleanUrl = url.split('?')[0]; // Strip query params for clean fetch
-    
-    const minDelay = GM_getValue(STORAGE_POLL_MIN, 3) * 1000;
-    const maxDelay = GM_getValue(STORAGE_POLL_MAX, 6) * 1000;
-    
-    logActivity(`Starting background stock poll (Delay: ${minDelay/1000}s - ${maxDelay/1000}s)...`, 'info');
-
-    const scheduleNextPoll = () => {
-      const delay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
-      const delaySec = (delay / 1000).toFixed(1);
-      setStatus('warn', 'Polling', `Next check in ${delaySec}s...`, true);
-      stockPollTimeout = setTimeout(doPoll, delay);
-    };
-
-    const doPoll = () => {
-      if (!botRunning && !GM_getValue(STORAGE_AUTO, false)) {
-        logActivity('Stock polling stopped (bot stopped).', 'warn');
-        return;
-      }
-
-      pollCount++;
-      if (pollCount % 5 === 0) {
-        logActivity(`Still polling stock... (check #${pollCount}) — ${cleanUrl}`, 'warn');
-      }
-      setStatus('info', 'Checking', `Polling stock now...`, true);
-
-      GM_xmlhttpRequest({
-        method: 'GET',
-        url: cleanUrl + "?_t=" + Date.now(), // Cache-busting timestamp
-        headers: {
-          'Accept': 'text/html',
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          'Pragma': 'no-cache',
-          'Expires': '0'
-        },
-        onload: function(res) {
-          if (!botRunning && !GM_getValue(STORAGE_AUTO, false)) {
-            return;
-          }
-
-          const html = res.responseText.toLowerCase();
-          const hasAddToCart = html.includes('add to cart');
-          const isOutOfStock = html.includes('out of stock') || html.includes('sold out') || html.includes('notify me');
-
-          if (hasAddToCart && !isOutOfStock) {
-            logActivity(`✅ STOCK DETECTED for ${cleanUrl}`, 'success');
-            setStatus('success', 'In Stock!', 'Triggering buy...', true);
-            showToast('🎉 In Stock! Buying now!', 'success');
-            playSound('stock');
-            sendDiscordNotification(
-              '🎉 STOCK DETECTED!',
-              `Product is now **IN STOCK**!\n\n🔗 [${cleanUrl}](${cleanUrl})`,
-              0x00e676 // green
-            );
-            onInStockCallback();
-          } else {
-             scheduleNextPoll();
-          }
-        },
-        onerror: function() {
-          // silently ignore network errors — keep polling
-          scheduleNextPoll();
-        }
-      });
-    };
-
-    doPoll(); // immediate first check
-  }
-
-  /* ─────────────────────────────────────────────
-     AUTO-BUY LOGIC
+     START / STOP BOT CONTROLS
   ───────────────────────────────────────────── */
   function startBot() {
-    if (botRunning) return;
     botRunning = true;
-
-    // Enable auto mode globally
     GM_setValue(STORAGE_AUTO, true);
-    const toggle = document.getElementById('tm-auto-toggle');
-    if (toggle) toggle.checked = true;
+    const autoToggle = document.getElementById('tm-auto-toggle');
+    if (autoToggle) autoToggle.checked = true;
 
-    document.getElementById('tm-start-bot-btn').style.display = 'none';
-    document.getElementById('tm-stop-bot-btn').style.display = 'flex';
+    const startBtn = document.getElementById('tm-start-bot-btn');
+    const stopBtn = document.getElementById('tm-stop-bot-btn');
+    if (startBtn && stopBtn) {
+      startBtn.style.display = 'none';
+      stopBtn.style.display = 'flex';
+    }
 
-    logActivity('Bot started! Auto-mode enabled.', 'info');
-    showToast('Bot Started', 'info');
+    startWatchdog();
+    logActivity('Sniper Bot started! Real-time sniper & human emulation armed.', 'success');
+    setStatus('info', 'Bot Active', 'Analyzing page...', true);
+    showToast('🎯 Sniper Bot Activated', 'success');
+    playSound('info');
 
-    // Route to correct page logic
     const path = window.location.pathname;
     const host = window.location.hostname;
 
-    if (/\/login/i.test(path)) {
-      checkLoginPage();
-    } else if (/\/cart/i.test(path)) {
+    if (/\/cart/i.test(path)) {
       checkCartPage();
     } else if (host.includes('checkout.toymate.com.au') || /\/checkout/i.test(path)) {
       checkCheckoutPage();
     } else {
+      setupLiveProductObserver();
       runBuyLoop();
     }
   }
@@ -1398,8 +1248,10 @@
   function stopBot() {
     botRunning = false;
     clearTimeout(botLoopTimeout);
+    clearTimeout(stockPollTimeout);
+    if (liveProductObserver) liveProductObserver.disconnect();
+    if (watchdogInterval) clearInterval(watchdogInterval);
 
-    // Disable auto mode globally
     GM_setValue(STORAGE_AUTO, false);
     const toggle = document.getElementById('tm-auto-toggle');
     if (toggle) toggle.checked = false;
@@ -1411,234 +1263,373 @@
       stopBtn.style.display = 'none';
     }
 
-    logActivity('Bot stopped manually.', 'warn');
+    setBotState(BotState.IDLE);
+    logActivity('Bot stopped by user.', 'warn');
     setStatus('warn', 'Bot Stopped', 'Waiting for input');
     showToast('Bot Stopped', 'warning');
   }
 
+  /* ─────────────────────────────────────────────
+     BUY LOOP & FLASH CART ADD
+  ───────────────────────────────────────────── */
   function runBuyLoop() {
     if (!botRunning) return;
 
+    setBotState(BotState.PRODUCT_DETECTED);
     const uiTargetQty = parseInt(document.getElementById('tm-target-qty')?.value);
-    const savedTargetQty = GM_getValue(STORAGE_TARGET_QTY, 0);
-    const activeTargetQty = uiTargetQty > 0 ? uiTargetQty : savedTargetQty;
-    let currentQty = activeTargetQty > 0 ? activeTargetQty : 1;
-    
-    const qtyInputUI = document.getElementById('tm-qty-input');
-    // Keep the UI in sync if the old action bar input exists
-    if (qtyInputUI) qtyInputUI.value = currentQty;
+    const savedTargetQty = GM_getValue(STORAGE_TARGET_QTY, 1);
+    let currentQty = (uiTargetQty > 0 ? uiTargetQty : savedTargetQty) || 1;
 
-    const nativeQtyInput = document.querySelector('input[name="quantity"]');
-    const form = nativeQtyInput ? nativeQtyInput.closest('form') : null;
-    const nativeAddBtn = form ? Array.from(form.querySelectorAll('button[type="submit"]')).find(b => b.textContent.toLowerCase().includes('add to cart')) : null;
+    const { input: nativeQtyInput, incBtn, decBtn } = findQuantityControls();
+    const nativeAddBtn = findAddToCartButton();
 
-    if (!nativeQtyInput || !nativeAddBtn) {
-      // No Add to Cart button visible — product might be out of stock right now.
-      // Use background fetch to poll stock silently instead of page refreshing.
+    if (!nativeAddBtn) {
+      // Out of stock on page — trigger dual-mode background polling
       const targetUrl = GM_getValue(STORAGE_TARGET_URL, '') || window.location.href;
-      logActivity('Add to Cart not found. Initializing silent background fetch...', 'warn');
-      setStatus('warn', 'Waiting', 'Initializing poll...', true);
+      setBotState(BotState.MONITORING, 'Polling stock');
+      logActivity('Add to Cart not found. Polling stock in background...', 'warn');
+      setStatus('warn', 'Waiting for Stock', 'Silent polling active...', true);
+
       checkStockInBackground(targetUrl, () => {
-        // Callback fires when stock detected — navigate to the product page
-        logActivity('Stock detected via fetch! Navigating to product page to buy...', 'success');
-        setStatus('info', 'In Stock!', 'Navigating...', true);
-        setTimeout(() => { window.location.href = targetUrl; }, 500);
+        logActivity('Stock spotted! Navigating to product page...', 'success');
+        triggerTurboMode(90);
+        window.location.href = targetUrl;
       });
       return;
     }
 
-    logActivity(`Attempting to add ${currentQty} to cart...`, 'info');
-    setStatus('info', 'Running', `Attempting qty: ${currentQty}`, true);
+    setBotState(BotState.ADJUSTING_QTY, `Target: ${currentQty}`);
+    logActivity(`Found product! Setting quantity: ${currentQty}...`, 'info');
+    setStatus('info', 'Adjusting Qty', `Target qty: ${currentQty}`, true);
 
     const setQtyPromise = new Promise(async (resolve) => {
-      const incBtn = document.querySelector('button[aria-label="Increase quantity"]');
-      if (incBtn && nativeQtyInput) {
+      if (nativeQtyInput) {
         let currentVal = parseInt(nativeQtyInput.value) || 1;
-        let diff = currentQty - currentVal;
-        if (diff > 0) {
-          logActivity(`Clicking increase button ${diff} times like a human...`, 'info');
+        const maxAttr = parseInt(nativeQtyInput.getAttribute('max'));
+        const effectiveTarget = (!isNaN(maxAttr) && maxAttr > 0) ? Math.min(currentQty, maxAttr) : currentQty;
+        let diff = effectiveTarget - currentVal;
+
+        if (diff > 0 && incBtn) {
+          logActivity(`Clicking Increase (+) button up to ${diff} time(s)...`, 'info');
           for (let i = 0; i < diff; i++) {
-            if (!botRunning) return;
+            if (!botRunning) return resolve();
+
+            // Stop if increase button is disabled
+            if (incBtn.disabled || incBtn.getAttribute('aria-disabled') === 'true' || incBtn.classList.contains('disabled')) {
+              logActivity('Reached maximum product limit (button disabled).', 'warn');
+              break;
+            }
+
+            const prevVal = parseInt(nativeQtyInput.value) || 0;
             await humanClick(incBtn);
-            await new Promise(r => setTimeout(r, 30)); // 30ms between clicks
+            await new Promise(r => setTimeout(r, randDelay(35, 75)));
+
+            const afterVal = parseInt(nativeQtyInput.value) || 0;
+            if (afterVal > 0 && afterVal === prevVal && i > 0) {
+              logActivity(`Maximum available limit reached (${afterVal}). Keeping it.`, 'info');
+              break;
+            }
+          }
+        } else if (diff < 0 && decBtn) {
+          const decreaseTimes = Math.abs(diff);
+          logActivity(`Clicking Decrease (-) button ${decreaseTimes} time(s)...`, 'info');
+          for (let i = 0; i < decreaseTimes; i++) {
+            if (!botRunning) return resolve();
+            if (decBtn.disabled || decBtn.getAttribute('aria-disabled') === 'true') {
+              break;
+            }
+            await humanClick(decBtn);
+            await new Promise(r => setTimeout(r, randDelay(35, 75)));
           }
         }
-        resolve();
-      } else {
-        humanType(nativeQtyInput, String(currentQty)).then(resolve);
+
+        const finalVal = parseInt(nativeQtyInput.value) || currentVal;
+        logActivity(`Purchase quantity set to: ${finalVal}`, 'success');
       }
+      resolve();
     });
 
-    setQtyPromise.then(() => {
+    setQtyPromise.then(async () => {
       if (!botRunning) return;
 
-      const cartBadge = document.querySelector('a[href="/cart/"] span');
-      const initialCount = cartBadge ? parseInt(cartBadge.textContent) || 0 : 0;
+      const initialBadge = getCartBadgeInfo();
 
-      // Re-query the Add to Cart button from the correct form as typing/clicking may have caused React to re-render it
-      const freshForm = document.querySelector('input[name="quantity"]')?.closest('form');
-      const freshAddBtn = freshForm ? Array.from(freshForm.querySelectorAll('button[type="submit"]')).find(b => b.textContent.toLowerCase().includes('add to cart')) : null;
-
+      const freshAddBtn = findAddToCartButton();
       if (!freshAddBtn) {
-        logActivity('Add to cart button disappeared after setting quantity. Retrying...', 'error');
-        botLoopTimeout = setTimeout(runBuyLoop, 1000);
+        logActivity('Add to Cart button missing after setting quantity. Retrying...', 'error');
+        botLoopTimeout = setTimeout(runBuyLoop, 600);
         return;
       }
 
-      humanClick(freshAddBtn).then(() => {
-        let checks = 0;
-        const verifyInterval = setInterval(() => {
-          if (!botRunning) { clearInterval(verifyInterval); return; }
+      setBotState(BotState.ADDING_TO_CART);
+      logActivity('Clicking "Add to cart" button with human curve trajectory...', 'info');
+      await humanClick(freshAddBtn);
 
-          checks++;
-          const newBadge = document.querySelector('a[href="/cart/"] span');
-          const newCount = newBadge ? parseInt(newBadge.textContent) || 0 : 0;
+      let verified = false;
+      let cartObserver = null;
 
-          // 1. Check for success (cart count increased)
-          if (newCount > initialCount) {
-            clearInterval(verifyInterval);
-            botRunning = false;
-            logActivity(`Success! Added ${currentQty} to cart. Total: ${newCount}`, 'success');
-            setStatus('success', 'Added to Cart', 'Redirecting to checkout...');
-            showToast('Success! Redirecting...', 'success');
+      const proceedToCartNavigation = (finalCount) => {
+        if (verified) return;
+        verified = true;
+        clearInterval(verifyInterval);
+        if (cartObserver) { cartObserver.disconnect(); cartObserver = null; }
 
+        setBotState(BotState.VERIFYING_CART, 'Added successfully');
+        logActivity(`✅ Success! Cart icon updated (Items: ${finalCount}). Opening cart...`, 'success');
+        setStatus('success', 'Added to Cart', 'Opening cart with human navigation...');
+        showToast(`✅ Added! (${finalCount} in cart)`, 'success');
+        playSound('success');
+
+        const cartDelay = randDelay(500, 1000);
+        logActivity(`Waiting ${cartDelay}ms then clicking cart icon like a human...`, 'info');
+        setTimeout(async () => {
+          setBotState(BotState.NAVIGATING_TO_CART);
+          const cartLink = findCartLink();
+
+          if (cartLink && document.body.contains(cartLink)) {
+            logActivity('Simulating human mouse trajectory to Cart icon in navbar...', 'info');
+            await humanClick(cartLink);
+            // Safety timeout: direct navigate if React router hasn't changed path within 1.2s
             setTimeout(() => {
-              window.location.href = 'https://checkout.toymate.com.au/checkout';
-            }, 1000);
-            return;
+              if (!window.location.pathname.includes('/cart')) {
+                logActivity('Executing navigation to /cart/...', 'info');
+                window.location.href = '/cart/';
+              }
+            }, 1200);
+          } else {
+            logActivity('Cart link not found. Navigating directly to /cart/...', 'warn');
+            window.location.href = '/cart/';
           }
+        }, cartDelay);
+      };
 
-          // 2. Check for "Out of Stock" error banner
-          const errorBanner = Array.from(document.querySelectorAll('div')).find(div =>
-            div.className.includes('bg-[var(--form-status-light-background-error') &&
-            div.textContent.includes('out of stock')
-          );
-
-          if (errorBanner) {
-            clearInterval(verifyInterval);
-            logActivity('Out of stock error detected by site.', 'warn');
-
-            if (currentQty > 1) {
-              currentQty--;
-              qtyInputUI.value = currentQty;
-              logActivity(`Reducing quantity to ${currentQty} and retrying...`, 'warn');
-              setStatus('warn', 'Out of Stock', `Lowered qty to ${currentQty}`, true);
-              botLoopTimeout = setTimeout(runBuyLoop, randDelay(500, 1000));
-            } else {
-              logActivity('Quantity is already 1, cannot reduce. Waiting 3s before retrying...', 'warn');
-              setStatus('warn', 'Out of Stock', 'Waiting to retry (Qty: 1)', true);
-              botLoopTimeout = setTimeout(runBuyLoop, 3000); // Wait longer if flickering stock
-            }
-            return;
+      // Real-time observer on Cart link and header container to detect <span> appearance immediately (<5ms)
+      const cartLink = findCartLink();
+      if (cartLink) {
+        cartObserver = new MutationObserver(() => {
+          const current = getCartBadgeInfo();
+          if (!initialBadge.hasBadge && current.hasBadge) {
+            proceedToCartNavigation(current.count);
+          } else if (current.hasBadge && current.count > initialBadge.count) {
+            proceedToCartNavigation(current.count);
           }
+        });
+        cartObserver.observe(cartLink, { childList: true, subtree: true, characterData: true });
+        if (cartLink.parentElement) {
+          cartObserver.observe(cartLink.parentElement, { childList: true, subtree: true, characterData: true });
+        }
+      }
 
-          // 3. Timeout check (site lag, no error, no success)
-          if (checks > 40) { // ~4 seconds wait before retry
-            clearInterval(verifyInterval);
-            logActivity('No response from site after 4 seconds. Retrying click...', 'warn');
-            setStatus('warn', 'Timeout', 'Retrying click', true);
-            botLoopTimeout = setTimeout(runBuyLoop, randDelay(300, 800));
+      // Fallback interval check
+      let checks = 0;
+      const verifyInterval = setInterval(() => {
+        if (!botRunning || verified) {
+          clearInterval(verifyInterval);
+          if (cartObserver) cartObserver.disconnect();
+          return;
+        }
+
+        checks++;
+        const current = getCartBadgeInfo();
+
+        // 1. SUCCESS: Cart icon changed from empty (no span) to filled (span present)
+        if (!initialBadge.hasBadge && current.hasBadge) {
+          proceedToCartNavigation(current.count);
+          return;
+        }
+
+        // 2. SUCCESS: Cart count increased
+        if (current.hasBadge && current.count > initialBadge.count) {
+          proceedToCartNavigation(current.count);
+          return;
+        }
+
+        // 3. SUCCESS: Cart already has items and 1s passed
+        if (current.hasBadge && current.count > 0 && checks >= 12) {
+          proceedToCartNavigation(current.count);
+          return;
+        }
+
+        // 4. Out of Stock banner detected
+        const errorBanner = Array.from(document.querySelectorAll('div, span')).find(el =>
+          (el.className && typeof el.className === 'string' && (el.className.includes('error') || el.className.includes('form-status-light-background-error'))) &&
+          el.textContent.toLowerCase().includes('out of stock')
+        );
+
+        if (errorBanner) {
+          clearInterval(verifyInterval);
+          if (cartObserver) cartObserver.disconnect();
+          triggerTurboMode(90);
+          logActivity('Site reported Out of Stock during add-to-cart.', 'warn');
+
+          if (currentQty > 1) {
+            currentQty--;
+            logActivity(`Lowering quantity to ${currentQty} and retrying...`, 'warn');
+            setStatus('warn', 'Retrying', `Lowered qty to ${currentQty}`, true);
+            botLoopTimeout = setTimeout(runBuyLoop, randDelay(400, 800));
+          } else {
+            logActivity('Stock flickered out. Switching to Turbo Polling...', 'warn');
+            botLoopTimeout = setTimeout(runBuyLoop, randDelay(1000, 2000));
           }
-        }, 100); // 100ms interval for faster checks
-      });
+          return;
+        }
+
+        // 5. Timeout check
+        if (checks > 75) {
+          clearInterval(verifyInterval);
+          if (cartObserver) cartObserver.disconnect();
+          if (current.hasBadge && current.count > 0) {
+            proceedToCartNavigation(current.count);
+          } else {
+            logActivity('No cart badge change after 6s. Retrying add-to-cart...', 'warn');
+            botLoopTimeout = setTimeout(runBuyLoop, randDelay(1000, 2000));
+          }
+        }
+      }, 80);
     });
   }
 
   /* ─────────────────────────────────────────────
-     PRODUCT PAGE CHECK
+     BACKGROUND STOCK POLLING (TWO-TIER: NORMAL & TURBO)
   ───────────────────────────────────────────── */
-  function checkProductPage() {
-    const titleEl = document.querySelector('h1');
-    const skuSpan = Array.from(document.querySelectorAll('span')).find(el => el.textContent.trim() === 'SKU#:');
-    const priceDiv = document.querySelector('.group\\/product-price');
-    const priceEl = priceDiv ? priceDiv.querySelector('span.font-bold, span') : null;
+  function checkStockInBackground(url, onInStockCallback) {
+    if (stockPollTimeout) clearTimeout(stockPollTimeout);
 
-    if (titleEl && skuSpan) {
-      buildPanel();
-      setPageBadge('product', 'Product Page');
-      document.getElementById(PANEL_ID).classList.remove('tm-hidden');
+    let pollCount = 0;
+    const cleanUrl = url.split('?')[0];
 
-      const title = titleEl.textContent.trim();
-      const sku = skuSpan.parentElement.textContent.replace('SKU#:', '').trim();
-      const price = priceEl ? priceEl.textContent.trim() : 'Unknown';
+    const doPoll = () => {
+      if (!botRunning && !GM_getValue(STORAGE_AUTO, false)) return;
 
-      setStatus('success', 'Product Detected', 'See Product tab for details');
+      pollCount++;
+      const isTurbo = isTurboModeActive();
+      const minDelay = isTurbo ? 300 : (GM_getValue(STORAGE_POLL_MIN, 3) * 1000);
+      const maxDelay = isTurbo ? 600 : (GM_getValue(STORAGE_POLL_MAX, 6) * 1000);
 
-      const productContainer = document.getElementById('tm-product-container');
-      if (productContainer) {
-        productContainer.innerHTML = `
-          <div class="tm-product-card">
-            <div class="tm-product-title">${escAttr(title)}</div>
-            <div class="tm-product-row">
-              <span class="tm-product-label">SKU</span>
-              <span class="tm-product-sku">${escAttr(sku)}</span>
-            </div>
-            <div class="tm-product-row">
-              <span class="tm-product-label">Price</span>
-              <span class="tm-product-price">${escAttr(price)}</span>
-            </div>
-          </div>
-        `;
+      const reqUrl = getJitteredUrl(cleanUrl);
+      const headers = getJitteredHeaders();
+
+      if (pollCount % 6 === 0 || isTurbo) {
+        logActivity(`[${isTurbo ? 'TURBO' : 'POLL'} #${pollCount}] Checking ${cleanUrl}...`, isTurbo ? 'warn' : 'info');
       }
 
-      logActivity('Product page detected and details extracted.', 'info');
-    }
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: reqUrl,
+        headers,
+        onload: function (res) {
+          if (!botRunning && !GM_getValue(STORAGE_AUTO, false)) return;
+
+          const html = res.responseText.toLowerCase();
+          const hasAddToCart = html.includes('add to cart');
+          const isOutOfStock = html.includes('out of stock') || html.includes('sold out') || html.includes('notify me');
+
+          if (hasAddToCart && !isOutOfStock) {
+            logActivity(`🚀 FLASH RESTOCK DETECTED for ${cleanUrl}!`, 'success');
+            setStatus('success', 'In Stock!', 'Executing purchase...', true);
+            showToast('🎉 In Stock! Sniping now!', 'success', 8000);
+            playSound('stock');
+            sendDiscordNotification(
+              '🎉 FLASH RESTOCK DETECTED!',
+              `Product is **IN STOCK**!\n\n🔗 [${cleanUrl}](${cleanUrl})`,
+              0x00E676
+            );
+            onInStockCallback();
+          } else {
+            const nextDelay = randDelay(minDelay, maxDelay);
+            stockPollTimeout = setTimeout(doPoll, nextDelay);
+          }
+        },
+        onerror: function () {
+          stockPollTimeout = setTimeout(doPoll, randDelay(minDelay, maxDelay));
+        }
+      });
+    };
+
+    doPoll();
   }
 
   /* ─────────────────────────────────────────────
-     CART PAGE LOGIC
+     CART PAGE HANDLER (SMART RECOVERY & BOT AVOIDANCE)
   ───────────────────────────────────────────── */
   function checkCartPage() {
     buildPanel();
     setPageBadge('product', 'Cart Page');
     document.getElementById(PANEL_ID).classList.remove('tm-hidden');
+    setBotState(BotState.ON_CART_PAGE);
 
     const autoEnabled = GM_getValue(STORAGE_AUTO, false);
     if (!autoEnabled) {
-      logActivity('Auto-checkout disabled. Waiting for user input.', 'warn');
-      setStatus('info', 'Cart Page Ready', 'Auto-login disabled.');
+      logActivity('Auto-checkout disabled. Ready on Cart page.', 'info');
+      setStatus('info', 'Cart Page', 'Auto-checkout disabled.');
       return;
     }
 
-    logActivity('Cart page detected. Waiting for cart app to load...', 'info');
-    setStatus('info', 'Auto-Checkout', 'Waiting for cart...', true);
+    logActivity('Cart page loaded. Verifying cart contents...', 'info');
+    setStatus('info', 'Cart Page', 'Verifying items...', true);
 
     const tryCheckout = (n = 0) => {
       if (!botRunning && !GM_getValue(STORAGE_AUTO, false)) return;
 
+      const emptyHeading = Array.from(document.querySelectorAll('h1, h2, div')).find(
+        el => el.textContent.trim().toLowerCase().includes('your cart is empty')
+      );
+
+      if (emptyHeading) {
+        let botDetectCount = GM_getValue(STORAGE_BOT_DETECT_COUNT, 0) + 1;
+        GM_setValue(STORAGE_BOT_DETECT_COUNT, botDetectCount);
+
+        const backoffMs = Math.min(Math.round(randDelay(2500, 4500) * Math.pow(1.4, botDetectCount)), 30000);
+        logActivity(`⚠️ Cart empty (Site wipe #${botDetectCount}). Exponential backoff: ${(backoffMs/1000).toFixed(1)}s...`, 'error');
+        setStatus('error', 'Cart Cleared', `Retrying in ${(backoffMs/1000).toFixed(1)}s...`);
+        showToast('⚠️ Cart cleared by site. Retrying...', 'error');
+
+        const targetUrl = GM_getValue(STORAGE_TARGET_URL, '').trim() || document.referrer || 'https://toymate.com.au/';
+        setTimeout(() => {
+          botRunning = true;
+          window.location.href = targetUrl;
+        }, backoffMs);
+        return;
+      }
+
+      GM_setValue(STORAGE_BOT_DETECT_COUNT, 0);
+
       const couponCode = GM_getValue(STORAGE_COUPON, '').trim();
       const couponInput = document.querySelector('input[name="couponCode"]');
-      const checkoutBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim().toLowerCase() === 'checkout' || b.textContent.includes('Checkout'));
+      
+      const getCheckoutBtn = () => {
+        return Array.from(document.querySelectorAll('button, a, input[type="submit"]')).find(b => {
+          const text = (b.textContent || b.value || '').trim().toLowerCase();
+          return text === 'checkout' || text.includes('checkout');
+        });
+      };
 
-      if (checkoutBtn) {
-        setStatus('info', 'Auto-Checkout', 'Processing cart...', true);
-        const proceedToCheckout = () => {
-          logActivity('Clicking checkout button...', 'info');
-          // Re-query checkout button as typing the coupon may have re-rendered it
-          const freshCheckoutBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim().toLowerCase() === 'checkout' || b.textContent.includes('Checkout'));
-          if (freshCheckoutBtn) {
-            humanClick(freshCheckoutBtn);
-          } else {
-            logActivity('Checkout button missing after typing coupon.', 'error');
+      const checkoutBtn = getCheckoutBtn();
+
+      if (checkoutBtn && !checkoutBtn.disabled && !checkoutBtn.classList.contains('disabled')) {
+        setStatus('info', 'Checkout', 'Applying details & proceeding...', true);
+        
+        const proceedToClick = async () => {
+          logActivity('Proceeding to Checkout with human click...', 'info');
+          const freshBtn = getCheckoutBtn();
+          if (freshBtn) {
+            await humanClick(freshBtn);
           }
         };
 
-        if (couponCode && couponInput) {
+        if (couponCode && couponInput && !couponInput.value) {
           logActivity(`Applying coupon code: ${couponCode}`, 'info');
-          setStatus('info', 'Applying Coupon', 'Typing code...', true);
           humanType(couponInput, couponCode).then(() => {
-            setTimeout(proceedToCheckout, 400);
+            setTimeout(proceedToClick, randDelay(400, 800));
           });
         } else {
-          if (couponCode) logActivity('Coupon provided, but input field not found on page.', 'warn');
-          setTimeout(proceedToCheckout, 400);
+          setTimeout(proceedToClick, randDelay(300, 600));
         }
-      } else if (n < 60) {
-        if (n % 10 === 0 && n > 0) logActivity('Still waiting for checkout button...', 'warn');
-        setTimeout(() => tryCheckout(n + 1), 200);
+      } else if (n < 50) {
+        setTimeout(() => tryCheckout(n + 1), 250);
       } else {
-        logActivity('Checkout button not found on page after 12 seconds.', 'error');
-        setStatus('error', 'Error', 'Checkout button missing');
+        logActivity('Checkout button did not appear within 12s.', 'error');
+        setStatus('error', 'Cart Error', 'Checkout button missing');
       }
     };
 
@@ -1646,22 +1637,22 @@
   }
 
   /* ─────────────────────────────────────────────
-     CHECKOUT PAGE LOGIC
+     CHECKOUT PAGE HANDLER (SHIPPING & PAYMENT)
   ───────────────────────────────────────────── */
   function checkCheckoutPage() {
     buildPanel();
-    setPageBadge('product', 'Checkout Page');
+    setPageBadge('product', 'Checkout');
     document.getElementById(PANEL_ID).classList.remove('tm-hidden');
 
     const autoEnabled = GM_getValue(STORAGE_AUTO, false);
     if (!autoEnabled) {
-      logActivity('Auto-checkout disabled. Waiting for user input.', 'warn');
+      logActivity('Auto-checkout disabled. Waiting for user.', 'info');
       setStatus('info', 'Checkout Ready', 'Auto-login disabled.');
       return;
     }
 
-    logActivity('Checkout page detected. Looking for continue button...', 'info');
-    setStatus('info', 'Auto-Checkout', 'Processing shipping...', true);
+    logActivity('Checkout page detected. Processing steps...', 'info');
+    setBotState(BotState.CHECKOUT_SHIPPING);
 
     const tryContinue = (n = 0) => {
       if (!botRunning && !GM_getValue(STORAGE_AUTO, false)) return;
@@ -1671,52 +1662,45 @@
       const ccLabel = document.querySelector('label[for="radio-adyenv3-scheme"]');
       const placeOrderBtn = document.getElementById('checkout-payment-continue');
 
-      // Step 1: Click Continue on Shipping if it's there
+      // Step 1: Shipping Continue
       if (continueBtn && !continueBtn.disabled && document.body.contains(continueBtn)) {
-        setStatus('info', 'Auto-Checkout', 'Continuing to payment...', true);
+        setBotState(BotState.CHECKOUT_SHIPPING, 'Continuing');
         logActivity('Clicking shipping continue button...', 'info');
         humanClick(continueBtn).then(() => {
           setTimeout(() => tryContinue(0), 1000);
         });
-        
-      // Step 2: Select Credit Card if we are on Payment step
+
+      // Step 2: Select Credit Card Payment
       } else if (ccRadio && !ccRadio.checked && ccLabel) {
-        setStatus('info', 'Auto-Checkout', 'Selecting Credit Card...', true);
+        setBotState(BotState.CHECKOUT_PAYMENT, 'Selecting Card');
         logActivity('Selecting Credit Card payment method...', 'info');
         humanClick(ccLabel).then(() => {
-          logActivity('Credit Card selected. Waiting for details...', 'success');
-          setStatus('success', 'Payment', 'Enter CC details');
+          logActivity('Credit Card selected. Waiting for Adyen frame...', 'success');
           setTimeout(() => tryContinue(0), 1000);
         });
 
-      // Step 3: Click Place Order once Credit Card is selected and button is available
+      // Step 3: Place Order
       } else if (ccRadio && ccRadio.checked && placeOrderBtn && document.body.contains(placeOrderBtn)) {
         if (!placeOrderBtn.disabled) {
-          setStatus('info', 'Auto-Checkout', 'Placing order...', true);
-          logActivity('Clicking Place Order button...', 'info');
+          setBotState(BotState.CHECKOUT_PAYMENT, 'Placing Order');
+          logActivity('Clicking Place Order button with human curve...', 'info');
           humanClick(placeOrderBtn).then(() => {
-            logActivity('Click sent. Re-verifying in 2s...', 'success');
+            logActivity('Place Order click sent!', 'success');
             playSound('success');
             sendDiscordNotification(
               '✅ ORDER PLACED!',
-              `🛒 Place Order button clicked on Toymate checkout!\n\n🔗 [View Checkout](${window.location.href})`,
-              0x2196f3 // blue
+              `🛒 Place Order button submitted on Toymate!\n\n🔗 [Checkout](${window.location.href})`,
+              0x2196F3
             );
-            // Retry clicking after 2 seconds if the button is still there (heavy site)
-            setTimeout(() => tryContinue(n + 1), 2000);
+            setTimeout(() => tryContinue(n + 1), 2500);
           });
         } else {
-          if (n % 10 === 0 && n > 0) logActivity('Waiting for Place Order to become enabled...', 'warn');
-          setTimeout(() => tryContinue(n + 1), 250);
+          setTimeout(() => tryContinue(n + 1), 300);
         }
-
-      // Step 4: Keep waiting for steps to load
-      } else if (n < 80) {
-        if (n % 10 === 0 && n > 0) logActivity('Waiting for checkout steps...', 'warn');
-        setTimeout(() => tryContinue(n + 1), 250);
+      } else if (n < 70) {
+        setTimeout(() => tryContinue(n + 1), 300);
       } else {
-        logActivity('Checkout step not found after 20 seconds.', 'error');
-        setStatus('error', 'Error', 'Checkout stalled');
+        logActivity('Checkout step stalled after 20s.', 'warn');
       }
     };
 
@@ -1724,15 +1708,14 @@
   }
 
   /* ─────────────────────────────────────────────
-     ADYEN IFRAME CHECK (CREDIT CARD)
+     ADYEN SECURE IFRAME AUTO-FILL
   ───────────────────────────────────────────── */
   function checkAdyenIframe() {
     const autoEnabled = GM_getValue(STORAGE_AUTO, false);
     if (!autoEnabled) return;
 
-    // Check which field this is and fill it
     const loop = setInterval(() => {
-      if (!botRunning && !GM_getValue(STORAGE_AUTO, false)) {
+      if (!GM_getValue(STORAGE_AUTO, false)) {
         clearInterval(loop);
         return;
       }
@@ -1754,15 +1737,182 @@
         const ccCvv = GM_getValue(STORAGE_CC_CVV, '');
         if (ccCvv) humanType(cvvInput, ccCvv);
       }
-    }, 500);
+    }, 400);
   }
 
   /* ─────────────────────────────────────────────
-     INIT
+     CATEGORY / PAGE MONITOR
+  ───────────────────────────────────────────── */
+  function togglePageMonitor() {
+    pageMonitorRunning = !pageMonitorRunning;
+    const btn = document.getElementById('tm-monitor-btn');
+    if (pageMonitorRunning) {
+      if (btn) btn.textContent = '⏹ Stop Mon';
+      logActivity('Page monitor started.', 'info');
+      const targetUrl = GM_getValue(STORAGE_TARGET_URL, '') || window.location.href;
+      schedulePageMonitorPoll(targetUrl);
+    } else {
+      if (btn) btn.textContent = '🔎 Monitor';
+      clearTimeout(pageMonitorTimeout);
+      logActivity('Page monitor stopped.', 'warn');
+    }
+  }
+
+  function schedulePageMonitorPoll(url) {
+    if (!pageMonitorRunning) return;
+    const minDelay = GM_getValue(STORAGE_POLL_MIN, 3) * 1000;
+    const maxDelay = GM_getValue(STORAGE_POLL_MAX, 6) * 1000;
+    const delay = randDelay(minDelay, maxDelay);
+    pageMonitorTimeout = setTimeout(() => executePageMonitorCheck(url), delay);
+  }
+
+  function executePageMonitorCheck(url) {
+    if (!pageMonitorRunning) return;
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url: getJitteredUrl(url),
+      headers: getJitteredHeaders(),
+      onload: function (res) {
+        if (!pageMonitorRunning) return;
+        const doc = new DOMParser().parseFromString(res.responseText, 'text/html');
+        const productForms = Array.from(doc.querySelectorAll('form')).filter(f => f.querySelector('input[name="productId"]'));
+
+        let inStockCount = 0;
+        let restockFound = false;
+
+        productForms.forEach(form => {
+          const idInput = form.querySelector('input[name="productId"]');
+          if (!idInput) return;
+          const pid = idInput.value;
+          const card = form.closest('[data-product-id], .group') || form.parentElement;
+          const aTag = card ? card.querySelector('a[href*="/product/"]') : null;
+          const productLink = (aTag && aTag.getAttribute('href')) ? new URL(aTag.getAttribute('href'), window.location.origin).href : url;
+
+          const btn = form.querySelector('button');
+          const btnText = btn ? btn.textContent.toLowerCase() : '';
+          const ariaLabel = btn ? (btn.getAttribute('aria-label') || '').toLowerCase() : '';
+          const isOutOfStock = btnText.includes('out of stock') || btnText.includes('notify') || ariaLabel.includes('out of stock');
+
+          const currentStatus = isOutOfStock ? 'out_of_stock' : 'in_stock';
+          if (currentStatus === 'in_stock') inStockCount++;
+
+          if (knownProductStatuses[pid] === 'out_of_stock' && currentStatus === 'in_stock') {
+            logActivity(`🚀 RESTOCK DETECTED on category: Product #${pid}`, 'success');
+            showToast(`🚀 Restock: Product #${pid}`, 'success', 8000);
+            playSound('stock');
+            triggerTurboMode(90);
+            sendDiscordNotification(
+              '🚀 RESTOCK DETECTED!',
+              `Product #${pid} is back in stock!\n\n🔗 [Buy Now](${productLink})`,
+              0x10B981
+            );
+
+            if (GM_getValue(STORAGE_AUTO_BUY_MONITOR, false)) {
+              window.location.href = productLink;
+              restockFound = true;
+            }
+          }
+          knownProductStatuses[pid] = currentStatus;
+        });
+
+        if (!restockFound) {
+          schedulePageMonitorPoll(url);
+        }
+      },
+      onerror: () => schedulePageMonitorPoll(url)
+    });
+  }
+
+  /* ─────────────────────────────────────────────
+     TCG RELEASE MONITOR
+  ───────────────────────────────────────────── */
+  function startTcgMonitor(url) {
+    if (tcgPollTimeout) clearTimeout(tcgPollTimeout);
+    let knownIds = JSON.parse(GM_getValue(STORAGE_TCG_KNOWN_IDS, '[]'));
+
+    const pollTcg = () => {
+      if (!GM_getValue(STORAGE_TCG_ENABLED, false)) return;
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: getJitteredUrl(url || 'https://toymate.com.au/search/?term=pokemon+tcg'),
+        headers: getJitteredHeaders(),
+        onload: function (res) {
+          const doc = new DOMParser().parseFromString(res.responseText, 'text/html');
+          const cards = Array.from(doc.querySelectorAll('div[data-product-id], form input[name="productId"]'));
+          const currentIds = cards.map(c => c.getAttribute('data-product-id') || c.value).filter(Boolean);
+
+          const newProducts = currentIds.filter(id => !knownIds.includes(id));
+          if (newProducts.length > 0 && knownIds.length > 0) {
+            logActivity(`🃏 NEW TCG PRODUCTS FOUND: ${newProducts.length} new listings!`, 'success');
+            playSound('stock');
+            sendDiscordNotification(
+              '🃏 NEW TCG LISTINGS DETECTED!',
+              `Toymate just listed ${newProducts.length} new TCG item(s)!\n\n🔗 [View Search](${url})`,
+              0x8B5CF6
+            );
+          }
+
+          knownIds = Array.from(new Set([...knownIds, ...currentIds]));
+          GM_setValue(STORAGE_TCG_KNOWN_IDS, JSON.stringify(knownIds));
+          tcgPollTimeout = setTimeout(pollTcg, randDelay(15000, 30000));
+        },
+        onerror: () => {
+          tcgPollTimeout = setTimeout(pollTcg, 20000);
+        }
+      });
+    };
+
+    pollTcg();
+  }
+
+  function stopTcgMonitor() {
+    if (tcgPollTimeout) clearTimeout(tcgPollTimeout);
+  }
+
+  /* ─────────────────────────────────────────────
+     PRODUCT PAGE DETAILS EXTRACTION
+  ───────────────────────────────────────────── */
+  function checkProductPageDetails() {
+    const titleEl = document.querySelector('h1');
+    const skuSpan = Array.from(document.querySelectorAll('span')).find(el => el.textContent.trim() === 'SKU#:');
+    const priceDiv = document.querySelector('.group\\/product-price');
+    const priceEl = priceDiv ? priceDiv.querySelector('span.font-bold, span') : null;
+
+    if (titleEl && skuSpan) {
+      buildPanel();
+      setPageBadge('product', 'Product Page');
+      document.getElementById(PANEL_ID).classList.remove('tm-hidden');
+
+      const title = titleEl.textContent.trim();
+      const sku = skuSpan.parentElement.textContent.replace('SKU#:', '').trim();
+      const price = priceEl ? priceEl.textContent.trim() : 'Unknown';
+
+      const productContainer = document.getElementById('tm-product-container');
+      if (productContainer) {
+        productContainer.innerHTML = `
+          <div class="tm-product-card">
+            <div class="tm-product-title">${escAttr(title)}</div>
+            <div class="tm-product-row">
+              <span class="tm-product-label">SKU</span>
+              <span class="tm-product-sku">${escAttr(sku)}</span>
+            </div>
+            <div class="tm-product-row">
+              <span class="tm-product-label">Price</span>
+              <span class="tm-product-price">${escAttr(price)}</span>
+            </div>
+          </div>
+        `;
+      }
+    }
+  }
+
+  /* ─────────────────────────────────────────────
+     INIT & BOOTSTRAP
   ───────────────────────────────────────────── */
   function init() {
     injectStyles();
     buildToggleBubble();
+
     const path = window.location.pathname;
     const host = window.location.hostname;
 
@@ -1771,24 +1921,38 @@
       return;
     }
 
-    if (/\/login/i.test(path)) {
-      checkLoginPage();
-    } else if (/\/cart/i.test(path)) {
+    if (/\/cart/i.test(path)) {
       checkCartPage();
     } else if (host.includes('checkout.toymate.com.au') || /\/checkout/i.test(path)) {
       checkCheckoutPage();
     } else {
       setTimeout(() => {
-        checkHomePage();
-        checkProductPage();
-      }, 1500);
+        checkProductPageDetails();
+        if (GM_getValue(STORAGE_AUTO, false)) {
+          startBot();
+        }
+      }, 800);
     }
 
-    // Start TCG monitor independently of the main bot if enabled
     if (GM_getValue(STORAGE_TCG_ENABLED, false)) {
       const tcgUrl = GM_getValue(STORAGE_TCG_URL, 'https://toymate.com.au/search/?term=pokemon+tcg');
       setTimeout(() => startTcgMonitor(tcgUrl), 2000);
     }
+
+    // React SPA Soft Navigation Fallback Observer
+    let lastPath = window.location.pathname;
+    setInterval(() => {
+      const currentPath = window.location.pathname;
+      if (currentPath !== lastPath) {
+        lastPath = currentPath;
+        if (/\/cart/i.test(currentPath) && currentState !== BotState.ON_CART_PAGE) {
+          logActivity('SPA soft navigation to /cart detected. Checking cart...', 'info');
+          if (botRunning || GM_getValue(STORAGE_AUTO, false)) checkCartPage();
+        } else if (window.location.hostname.includes('checkout.') || /\/checkout/i.test(currentPath)) {
+          if (botRunning || GM_getValue(STORAGE_AUTO, false)) checkCheckoutPage();
+        }
+      }
+    }, 500);
   }
 
   if (document.readyState === 'loading') {
