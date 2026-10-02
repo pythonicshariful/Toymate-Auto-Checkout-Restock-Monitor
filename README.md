@@ -17,9 +17,9 @@ A powerful, stealthy Tampermonkey userscript that fully automates the Toymate ch
 | 🎲 **Randomized Delays** | Configurable min/max polling interval with jitter to appear human-like |
 | 📦 **Custom Quantity & Human-Like Interactions** | Set a target Buy Quantity. The bot physically clicks the `+` button extremely fast to reach the quantity, perfectly bypassing React restrictions |
 | 🎯 **Remote Product Monitoring** | Monitor a single product's stock from ANY page on the site |
-| 🔎 **Search Page Monitoring** | Monitor an *entire* search or category page (e.g. all Pokemon TCG products) and instantly detect when *any* item drops back in stock |
+| 🔎 **Category Page Monitoring** | Monitor an *entire* category page (e.g. all Pokemon TCG products) and instantly detect when *any* item drops back in stock |
 | 🃏 **TCG Release Alerts** | Dedicated background worker that watches for brand new, never-before-seen products to drop on the site |
-| ⚡ **Auto-Buy on Restock** | When a monitored item restocks, the bot can optionally redirect your browser and instantly buy it |
+| 🔔 **Decoupled Category Monitor** | Dedicated Restock Monitor strictly for notifications (Ping/Toast/Sound), with an optional Auto-Buy toggle for the brave |
 | 🔔 **Discord Notifications** | Instant webhook alerts for: Stock Detected, New Releases, Order Placed |
 | 💳 **Adyen CC Support** | Auto-fills Credit Card Number, Expiry, CVV into secure Adyen iframes |
 | 🎛️ **5-Tab UI** | Clean, compact floating panel with tabs — Login, Pay, Bot, Alerts, Item |
@@ -50,18 +50,18 @@ Click the **🧸 bubble** to open the panel, then configure each tab:
 - Enter your **Coupon Code** (optional, e.g., `TOYS10`) — auto-applied at checkout.
 - *Stored locally and auto-filled into the Adyen payment iframe during checkout.*
 
-### 🎯 Bot Tab
-- **Target URL**: The specific product URL you want to buy or monitor.
-- Click **📍 Here** to instantly set it to the current page URL.
-- **Buy Quantity**: The number of items you want to buy (the bot will click the `+` button this many times).
+### 🎯 Monitor Tab
+- **Target Product URL (For Sniper)**: The specific product URL you want the bot to auto-checkout.
+- **Category Monitor URL (Notify-Only)**: The search/category URL the background worker watches for restocks (defaults to Pokémon TCG).
+- **Buy Quantity**: The number of items you want to buy (bot clicks `+` this many times).
 - **Min / Max (s)**: The randomized delay interval for stock checks.
-- **⚡ Auto-Buy Monitor Restocks**: If ON, when the search monitor finds a restock, it automatically navigates to the item and buys it.
+- **⚡ Auto-Buy on Restock (Warning)**: If ON, the Category Monitor will instantly navigate to and buy the first item that restocks. Leave OFF for notify-only mode.
 
 ### 📡 Alerts Tab
 - **Discord Webhook URL**: Paste your Discord channel webhook here to receive alerts.
 - **Notification Sounds**: Toggle audio alerts on/off.
 - **TCG Release Alerts**: Toggle the background worker that hunts for brand new items.
-- **TCG Search URL**: The search/category URL the background worker and Page Monitor will watch (e.g. `https://toymate.com.au/search/?term=pokemon+tcg`).
+- **TCG Search URL**: The category URL the background worker watches for new drops (e.g. `https://toymate.com.au/trading-cards/battling-card-games/pokemon-trading-cards/`).
 
 Click **💾 Save** at the bottom to save all settings!
 
@@ -72,7 +72,7 @@ Click **💾 Save** at the bottom to save all settings!
 ### ✅ Scenario A — Buy an In-Stock Product Right Now
 
 1. Go to the product page of the item you want.
-2. Open the **Bot tab**, click **📍 Here**, and set your **Buy Quantity** (e.g. 36).
+2. Open the **Monitor tab**, click **📍 Here** (in the Item tab) to set the URL, and set your **Buy Quantity** (e.g. 36).
 3. Click **Start Bot**.
 4. The bot will:
    - Rapidly click the `+` button 35 times.
@@ -88,7 +88,7 @@ Click **💾 Save** at the bottom to save all settings!
 ### ⏳ Scenario B — Monitor a Specific Out-of-Stock Product
 
 1. Navigate to the out-of-stock product page.
-2. Open the **Bot tab** → Click **📍 Here**.
+2. Open the **Monitor tab** and ensure your Target URL is set.
 3. Click **Start Bot**.
 4. The bot notices the "Add to Cart" button is missing and silently starts polling the page in the background.
 5. The moment stock drops:
@@ -98,17 +98,18 @@ Click **💾 Save** at the bottom to save all settings!
 
 ---
 
-### 🔎 Scenario C — Monitor an Entire Search Page for ANY Restocks
+### 🔎 Scenario C — Monitor an Entire Category Page for ANY Restocks
 
-Don't want to track just one item? You can track a whole search page!
+Don't want to track just one item? You can track a whole category page!
 
-1. Go to any search or category page (e.g. Pokemon TCG search results).
+1. Open the **Monitor tab** and ensure your **Category Monitor URL** is set (defaults to Pokémon TCG).
 2. Click the blue **🔎 Monitor** button at the bottom of the bot panel.
-3. The bot will take a snapshot of every product on the page.
+3. The bot will take a snapshot of every product on the page using Next.js compatible parsing.
 4. It will silently poll the page in the background based on your Min/Max delays.
-5. If *any* product goes from "Out of Stock" to "Add to Cart":
+5. If *any* product goes from "Out of Stock" to "In Stock":
    - It blasts a Discord notification with a direct link to the product.
-   - If **⚡ Auto-Buy Monitor Restocks** is enabled, it instantly navigates to that product and starts the auto-checkout bot!
+   - Plays a sound and shows a toast.
+   - If **⚡ Auto-Buy on Restock** is ON, it instantly navigates to that product and starts the auto-checkout bot! (Warning: Buys the first thing that restocks).
 
 ---
 

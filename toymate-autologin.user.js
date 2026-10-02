@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Toymate Auto Checkout & Restock Monitor
 // @namespace    https://toymate.com.au/
-// @version      2.0.3
+// @version      2.1.0
 // @description  Advanced auto-checkout, flash restock sniper, bezier human emulation, and TCG release alert bot for Toymate.
 // @author       Pythonic Shariful
 // @match        https://toymate.com.au/*
@@ -54,6 +54,7 @@
   const STORAGE_TCG_URL          = 'tm_tcg_category_url';
   const STORAGE_TCG_KNOWN_IDS    = 'tm_tcg_known_ids';
   const STORAGE_AUTO_BUY_MONITOR = 'tm_auto_buy_monitor';
+  const STORAGE_MONITOR_URL      = 'tm_monitor_url';
   const STORAGE_PERSONALITY      = 'tm_personality_mode';
   const STORAGE_TURBO_POLL       = 'tm_turbo_poll_enabled';
   const STORAGE_BOT_DETECT_COUNT = 'tm_bot_detect_count';
@@ -867,9 +868,10 @@
     const savedDiscordWebhook = GM_getValue(STORAGE_DISCORD_WEBHOOK, '');
     const savedSoundEnabled = GM_getValue(STORAGE_SOUND_ENABLED, true);
     const savedTcgEnabled = GM_getValue(STORAGE_TCG_ENABLED, false);
-    const savedTcgUrl = GM_getValue(STORAGE_TCG_URL, 'https://toymate.com.au/search/?term=pokemon+tcg');
+    const savedTcgUrl = GM_getValue(STORAGE_TCG_URL, 'https://toymate.com.au/trading-cards/battling-card-games/pokemon-trading-cards/');
     const autoBuyMonitor = GM_getValue(STORAGE_AUTO_BUY_MONITOR, false);
     const savedPersonality = GM_getValue(STORAGE_PERSONALITY, 'normal');
+    const savedMonitorUrl = GM_getValue(STORAGE_MONITOR_URL, 'https://toymate.com.au/trading-cards/battling-card-games/pokemon-trading-cards/');
 
     const panel = document.createElement('div');
     panel.id = PANEL_ID;
@@ -965,7 +967,7 @@
         <!-- MONITOR TAB -->
         <div class="tm-section" id="tm-sec-monitor">
           <div class="tm-field">
-            <div class="tm-label">🎯 Target Product URL</div>
+            <div class="tm-label">🎯 Target Product URL (For Sniper)</div>
             <input type="text" id="tm-target-url" value="${escAttr(savedTargetUrl)}" placeholder="https://toymate.com.au/product/..." style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:8px 12px;font-family:inherit;font-size:11.5px;outline:none;" />
           </div>
           <div style="display:flex;gap:8px;">
@@ -982,8 +984,15 @@
               <input type="number" id="tm-poll-max" value="${savedPollMax}" min="1" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:8px 12px;font-family:inherit;font-size:12.5px;outline:none;" />
             </div>
           </div>
+          <div class="tm-field">
+            <div class="tm-label">📋 Category Monitor URL (Notify-Only)</div>
+            <input type="text" id="tm-monitor-url" value="${escAttr(savedMonitorUrl)}" placeholder="https://toymate.com.au/trading-cards/..." style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:10px;padding:8px 12px;font-family:inherit;font-size:11.5px;outline:none;" />
+            <div style="font-size:10px;color:rgba(255,255,255,.4);margin-top:4px;">
+              🔔 Monitors this page for restocks. Sends notification — never auto-buys.
+            </div>
+          </div>
           <div class="tm-toggle-row">
-            <span class="tm-toggle-label">⚡ Auto-Buy Monitor Restocks</span>
+            <span class="tm-toggle-label">⚡ Auto-Buy on Restock (Warning: Buys Any)</span>
             <label class="tm-switch">
               <input type="checkbox" id="tm-autobuy-monitor-toggle" ${autoBuyMonitor ? 'checked' : ''} />
               <span class="tm-switch-slider"></span>
@@ -1138,6 +1147,7 @@
     GM_setValue(STORAGE_POLL_MAX, parseInt(document.getElementById('tm-poll-max')?.value) || 6);
     GM_setValue(STORAGE_DISCORD_WEBHOOK, document.getElementById('tm-discord-webhook')?.value.trim() || '');
     GM_setValue(STORAGE_TCG_URL, document.getElementById('tm-tcg-url')?.value.trim() || '');
+    GM_setValue(STORAGE_MONITOR_URL, document.getElementById('tm-monitor-url')?.value.trim() || '');
     showToast('All settings saved!', 'success');
     logActivity('All settings saved to secure local storage.', 'success');
   }
@@ -1816,7 +1826,7 @@
     if (pageMonitorRunning) {
       if (btn) btn.textContent = '⏹ Stop Mon';
       logActivity('Page monitor started.', 'info');
-      const targetUrl = GM_getValue(STORAGE_TARGET_URL, '') || window.location.href;
+      const targetUrl = GM_getValue(STORAGE_MONITOR_URL, 'https://toymate.com.au/trading-cards/battling-card-games/pokemon-trading-cards/') || window.location.href;
       schedulePageMonitorPoll(targetUrl);
     } else {
       if (btn) btn.textContent = '🔎 Monitor';
@@ -1833,6 +1843,39 @@
     pageMonitorTimeout = setTimeout(() => executePageMonitorCheck(url), delay);
   }
 
+  function parseRestockableProducts(doc, baseUrl) {
+    const results = [];
+    doc.querySelectorAll('a[id]').forEach(anchor => {
+      const pid = anchor.id;
+      if (!/^\d+$/.test(pid)) return;
+      const href = anchor.getAttribute('href') || '';
+      const productLink = href.startsWith('http') ? href : new URL(href, baseUrl).href;
+      const productName = anchor.getAttribute('aria-label') || anchor.textContent?.trim() || `Product #${pid}`;
+      const card = anchor.closest('li, article, [class*="product"]') || anchor.parentElement?.parentElement;
+      const btn = card?.querySelector('button');
+      const btnAriaLabel = (btn?.getAttribute('aria-label') || '').toLowerCase();
+      const btnText = (btn?.textContent || '').trim().toLowerCase();
+      const isOutOfStock = btnText.includes('out of stock') || btnText.includes('notify') || btnAriaLabel.includes('notify') || btnAriaLabel.includes('out of stock') || (card?.textContent || '').toLowerCase().includes('out of stock');
+      results.push({ pid, productName, productLink, isOutOfStock });
+    });
+    if (results.length === 0) {
+      doc.querySelectorAll('button[aria-label]').forEach(btn => {
+        const ariaLabel = btn.getAttribute('aria-label') || '';
+        const isAddToCart = ariaLabel.toLowerCase().includes('add to cart');
+        const isNotify = ariaLabel.toLowerCase().includes('notify') || ariaLabel.toLowerCase().includes('out of stock');
+        if (!isAddToCart && !isNotify) return;
+        const card = btn.closest('li, article, [class*="product"]') || btn.parentElement?.parentElement;
+        const anchor = card?.querySelector('a[href*="/"]');
+        const href = anchor?.getAttribute('href') || '';
+        const productLink = href.startsWith('http') ? href : (href ? new URL(href, baseUrl).href : baseUrl);
+        const pid = anchor?.id || ariaLabel.replace(/[^a-z0-9]/gi, '').substring(0, 20);
+        const productName = ariaLabel.replace(/^(add to cart for|notify me for)\s*/i, '').trim() || `Product via btn`;
+        results.push({ pid, productName, productLink, isOutOfStock: isNotify });
+      });
+    }
+    return results;
+  }
+
   function executePageMonitorCheck(url) {
     if (!pageMonitorRunning) return;
     GM_xmlhttpRequest({
@@ -1842,49 +1885,30 @@
       onload: function (res) {
         if (!pageMonitorRunning) return;
         const doc = new DOMParser().parseFromString(res.responseText, 'text/html');
-        const productForms = Array.from(doc.querySelectorAll('form')).filter(f => f.querySelector('input[name="productId"]'));
+        const products = parseRestockableProducts(doc, url);
 
-        let inStockCount = 0;
-        let restockFound = false;
-
-        productForms.forEach(form => {
-          const idInput = form.querySelector('input[name="productId"]');
-          if (!idInput) return;
-          const pid = idInput.value;
-          const card = form.closest('[data-product-id], .group') || form.parentElement;
-          const aTag = card ? card.querySelector('a[href*="/product/"]') : null;
-          const productLink = (aTag && aTag.getAttribute('href')) ? new URL(aTag.getAttribute('href'), window.location.origin).href : url;
-
-          const btn = form.querySelector('button');
-          const btnText = btn ? btn.textContent.toLowerCase() : '';
-          const ariaLabel = btn ? (btn.getAttribute('aria-label') || '').toLowerCase() : '';
-          const isOutOfStock = btnText.includes('out of stock') || btnText.includes('notify') || ariaLabel.includes('out of stock');
-
+        products.forEach(({ pid, productName, productLink, isOutOfStock }) => {
           const currentStatus = isOutOfStock ? 'out_of_stock' : 'in_stock';
-          if (currentStatus === 'in_stock') inStockCount++;
-
           if (knownProductStatuses[pid] === 'out_of_stock' && currentStatus === 'in_stock') {
-            logActivity(`🚀 RESTOCK DETECTED on category: Product #${pid}`, 'success');
-            showToast(`🚀 Restock: Product #${pid}`, 'success', 8000);
+            logActivity(`🚀 RESTOCK: ${productName}`, 'success');
+            showToast(`🚀 RESTOCK: ${productName.substring(0, 45)}`, 'success', 20000);
             playSound('stock');
-            triggerTurboMode(90);
+            triggerTurboMode(60);
             sendDiscordNotification(
-              '🚀 RESTOCK DETECTED!',
-              `Product #${pid} is back in stock!\n\n🔗 [Buy Now](${productLink})`,
+              '🚀 RESTOCK ALERT — Pokémon TCG',
+              `**${productName}** is back in stock!\n\n🔗 [Buy Now — Click to Purchase](${productLink})\n\n⚠️ *This is a notification only unless Auto-Buy is ON.*`,
               0x10B981
             );
-
+            
             if (GM_getValue(STORAGE_AUTO_BUY_MONITOR, false)) {
+              logActivity(`Auto-Buy is ON! Navigating to purchase ${productName}...`, 'warn');
               window.location.href = productLink;
-              restockFound = true;
+              return; // Stop processing further products to avoid multiple redirects
             }
           }
           knownProductStatuses[pid] = currentStatus;
         });
-
-        if (!restockFound) {
-          schedulePageMonitorPoll(url);
-        }
+        schedulePageMonitorPoll(url);
       },
       onerror: () => schedulePageMonitorPoll(url)
     });
@@ -1901,12 +1925,12 @@
       if (!GM_getValue(STORAGE_TCG_ENABLED, false)) return;
       GM_xmlhttpRequest({
         method: 'GET',
-        url: getJitteredUrl(url || 'https://toymate.com.au/search/?term=pokemon+tcg'),
+        url: getJitteredUrl(url || 'https://toymate.com.au/trading-cards/battling-card-games/pokemon-trading-cards/'),
         headers: getJitteredHeaders(),
         onload: function (res) {
           const doc = new DOMParser().parseFromString(res.responseText, 'text/html');
-          const cards = Array.from(doc.querySelectorAll('div[data-product-id], form input[name="productId"]'));
-          const currentIds = cards.map(c => c.getAttribute('data-product-id') || c.value).filter(Boolean);
+          const anchors = Array.from(doc.querySelectorAll('a[id]')).filter(a => /^\d+$/.test(a.id));
+          const currentIds = anchors.map(a => a.id).filter(Boolean);
 
           const newProducts = currentIds.filter(id => !knownIds.includes(id));
           if (newProducts.length > 0 && knownIds.length > 0) {
@@ -1995,33 +2019,19 @@
     } else {
       setTimeout(() => {
         checkProductPageDetails();
-        if (GM_getValue(STORAGE_AUTO, false)) {
-          // Only auto-start if we are on the configured target product URL
-          const savedTarget = GM_getValue(STORAGE_TARGET_URL, '').trim();
-          if (savedTarget) {
-            const normUrl = (raw) => {
-              try {
-                const u = new URL(raw);
-                return u.hostname.replace(/^www\./, '').toLowerCase() + u.pathname.replace(/\/$/, '').toLowerCase();
-              } catch(e) { return raw.split('?')[0].replace(/\/$/, '').toLowerCase(); }
-            };
-            if (normUrl(window.location.href) === normUrl(savedTarget)) {
-              startBot();
-            } else {
-              logActivity('Auto-start skipped: not on target product page. Navigate to your target URL to begin.', 'info');
-              setStatus('info', 'Ready', 'Navigate to target product URL to auto-start.');
-            }
-          } else {
-            // No target URL saved — don't auto-start to prevent acting on random pages
-            logActivity('Auto-start skipped: no Target Product URL configured. Set one in the Monitor tab.', 'warn');
-            setStatus('warn', 'No Target Set', 'Set a Target URL in the Monitor tab.');
-          }
+        // Do NOT auto-start; user must click "Start Sniper" each session to prevent rogue buys
+        const savedTarget = GM_getValue(STORAGE_TARGET_URL, '').trim();
+        if (savedTarget) {
+          setStatus('info', 'Ready to Snipe', `Target: ${savedTarget.substring(0,40)}...`);
+          logActivity(`Target configured: ${savedTarget}. Click "Start Sniper" to arm.`, 'info');
+        } else {
+          setStatus('warn', 'No Target Set', 'Set a Target URL in the Monitor tab.');
         }
       }, 800);
     }
 
     if (GM_getValue(STORAGE_TCG_ENABLED, false)) {
-      const tcgUrl = GM_getValue(STORAGE_TCG_URL, 'https://toymate.com.au/search/?term=pokemon+tcg');
+      const tcgUrl = GM_getValue(STORAGE_TCG_URL, 'https://toymate.com.au/trading-cards/battling-card-games/pokemon-trading-cards/');
       setTimeout(() => startTcgMonitor(tcgUrl), 2000);
     }
 
@@ -2033,9 +2043,9 @@
         lastPath = currentPath;
         if (/\/cart/i.test(currentPath) && currentState !== BotState.ON_CART_PAGE) {
           logActivity('SPA soft navigation to /cart detected. Checking cart...', 'info');
-          if (botRunning || GM_getValue(STORAGE_AUTO, false)) checkCartPage();
+          if (botRunning) checkCartPage();
         } else if (window.location.hostname.includes('checkout.') || /\/checkout/i.test(currentPath)) {
-          if (botRunning || GM_getValue(STORAGE_AUTO, false)) checkCheckoutPage();
+          if (botRunning) checkCheckoutPage();
         }
       }
     }, 500);
