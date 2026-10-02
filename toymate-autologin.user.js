@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Toymate Auto Checkout & Restock Monitor
 // @namespace    https://toymate.com.au/
-// @version      2.0.1
+// @version      2.0.3
 // @description  Advanced auto-checkout, flash restock sniper, bezier human emulation, and TCG release alert bot for Toymate.
 // @author       Pythonic Shariful
 // @match        https://toymate.com.au/*
@@ -1214,6 +1214,18 @@
      START / STOP BOT CONTROLS
   ───────────────────────────────────────────── */
   function startBot() {
+    // Pre-flight: require a target URL before arming the bot
+    const savedTarget = GM_getValue(STORAGE_TARGET_URL, '').trim();
+    if (!savedTarget) {
+      showToast('⚠️ Set a Target Product URL in the Monitor tab first!', 'error', 6000);
+      logActivity('🚫 Start blocked: no Target Product URL configured. Go to Monitor tab and set one.', 'error');
+      setStatus('error', 'No Target Set', 'Open the Monitor tab and set a Target URL.');
+      // Switch to Monitor tab automatically
+      const monitorTab = document.querySelector('.tm-tab[data-tab="monitor"]');
+      if (monitorTab) monitorTab.click();
+      return;
+    }
+
     botRunning = true;
     GM_setValue(STORAGE_AUTO, true);
     const autoToggle = document.getElementById('tm-auto-toggle');
@@ -1275,6 +1287,61 @@
   function runBuyLoop() {
     if (!botRunning) return;
 
+    // ── SAFETY CHECK: Only act on the configured target product URL ──
+    const targetUrl = GM_getValue(STORAGE_TARGET_URL, '').trim();
+
+    // Block entirely if no target URL is configured
+    if (!targetUrl) {
+      setBotState(BotState.IDLE);
+      logActivity('🚫 No Target Product URL set. Configure one in the Monitor tab before starting.', 'error');
+      setStatus('error', 'No Target Set', 'Set a Target URL in the Monitor tab first.');
+      showToast('⚠️ Set a Target Product URL first!', 'error', 6000);
+      stopBot();
+      return;
+    }
+
+    // Block if we are on the wrong page — redirect to target instead
+    // Normalise both URLs: strip www., lowercase hostname, strip trailing slash & query string
+    const normaliseUrl = (raw) => {
+      try {
+        const u = new URL(raw);
+        const host = u.hostname.replace(/^www\./, '').toLowerCase();
+        const path = u.pathname.replace(/\/$/, '').toLowerCase();
+        return host + path;
+      } catch (e) {
+        return raw.split('?')[0].replace(/\/$/, '').toLowerCase();
+      }
+    };
+
+    const currentNorm = normaliseUrl(window.location.href);
+    const targetNorm  = normaliseUrl(targetUrl);
+
+    if (currentNorm !== targetNorm) {
+      // Guard: prevent infinite redirect loops using sessionStorage counter
+      const REDIRECT_KEY = 'tm_redirect_count';
+      const redirectCount = parseInt(sessionStorage.getItem(REDIRECT_KEY) || '0');
+      if (redirectCount >= 3) {
+        sessionStorage.removeItem(REDIRECT_KEY);
+        logActivity('🚫 Redirect loop detected (3 redirects with no match). Stopping bot. Check your Target URL is correct.', 'error');
+        setStatus('error', 'Redirect Loop', 'Check your Target URL in Monitor tab.');
+        showToast('⚠️ Redirect loop stopped! Fix your Target URL.', 'error', 8000);
+        stopBot();
+        return;
+      }
+      sessionStorage.setItem(REDIRECT_KEY, String(redirectCount + 1));
+
+      // We are NOT on the target page — navigate there and let the page reload trigger the loop
+      setBotState(BotState.MONITORING, 'Navigating to target');
+      logActivity(`⚠️ Current page does not match target. Navigating to target URL... (attempt ${redirectCount + 1}/3)`, 'warn');
+      setStatus('warn', 'Wrong Page', 'Redirecting to target product...', true);
+      window.location.href = targetUrl;
+      return;
+    }
+
+    // On the correct page — clear any redirect counter
+    sessionStorage.removeItem('tm_redirect_count');
+
+
     setBotState(BotState.PRODUCT_DETECTED);
     const uiTargetQty = parseInt(document.getElementById('tm-target-qty')?.value);
     const savedTargetQty = GM_getValue(STORAGE_TARGET_QTY, 1);
@@ -1285,15 +1352,15 @@
 
     if (!nativeAddBtn) {
       // Out of stock on page — trigger dual-mode background polling
-      const targetUrl = GM_getValue(STORAGE_TARGET_URL, '') || window.location.href;
+      const pollUrl = targetUrl || window.location.href;
       setBotState(BotState.MONITORING, 'Polling stock');
       logActivity('Add to Cart not found. Polling stock in background...', 'warn');
       setStatus('warn', 'Waiting for Stock', 'Silent polling active...', true);
 
-      checkStockInBackground(targetUrl, () => {
+      checkStockInBackground(pollUrl, () => {
         logActivity('Stock spotted! Navigating to product page...', 'success');
         triggerTurboMode(90);
-        window.location.href = targetUrl;
+        window.location.href = pollUrl;
       });
       return;
     }
@@ -1929,7 +1996,26 @@
       setTimeout(() => {
         checkProductPageDetails();
         if (GM_getValue(STORAGE_AUTO, false)) {
-          startBot();
+          // Only auto-start if we are on the configured target product URL
+          const savedTarget = GM_getValue(STORAGE_TARGET_URL, '').trim();
+          if (savedTarget) {
+            const normUrl = (raw) => {
+              try {
+                const u = new URL(raw);
+                return u.hostname.replace(/^www\./, '').toLowerCase() + u.pathname.replace(/\/$/, '').toLowerCase();
+              } catch(e) { return raw.split('?')[0].replace(/\/$/, '').toLowerCase(); }
+            };
+            if (normUrl(window.location.href) === normUrl(savedTarget)) {
+              startBot();
+            } else {
+              logActivity('Auto-start skipped: not on target product page. Navigate to your target URL to begin.', 'info');
+              setStatus('info', 'Ready', 'Navigate to target product URL to auto-start.');
+            }
+          } else {
+            // No target URL saved — don't auto-start to prevent acting on random pages
+            logActivity('Auto-start skipped: no Target Product URL configured. Set one in the Monitor tab.', 'warn');
+            setStatus('warn', 'No Target Set', 'Set a Target URL in the Monitor tab.');
+          }
         }
       }, 800);
     }
