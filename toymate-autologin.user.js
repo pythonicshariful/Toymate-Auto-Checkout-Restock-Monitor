@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Toymate Auto Checkout & Restock Monitor
 // @namespace    https://toymate.com.au/
-// @version      2.1.0
+// @version      2.2.1
 // @description  Advanced auto-checkout, flash restock sniper, bezier human emulation, and TCG release alert bot for Toymate.
 // @author       Pythonic Shariful
 // @match        https://toymate.com.au/*
@@ -118,6 +118,7 @@
   };
 
   let currentState = BotState.IDLE;
+  let buyButtonWaitTries = 0;
   let botRunning = false;
   let botLoopTimeout = null;
   let stockPollTimeout = null;
@@ -424,19 +425,94 @@
   /* ─────────────────────────────────────────────
      ROBUST ELEMENT LOCATORS FOR TOYMATE REACT UI
   ───────────────────────────────────────────── */
-  function findAddToCartButton() {
-    const buttons = Array.from(document.querySelectorAll('button'));
-    const found = buttons.find(b => {
-      if (b.disabled || b.getAttribute('aria-disabled') === 'true') return false;
-      const txt = (b.textContent || '').trim().toLowerCase();
-      const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-      return (txt.includes('add to cart') || aria.includes('add to cart')) && !txt.includes('out of stock') && !txt.includes('sold out');
-    });
-    if (found) return found;
+  /*
+   * Toymate main product buy-button states (verified from live product HTML):
+   *   IN STOCK     -> enabled  <button type="submit">Add to cart</button>
+   *   PRE-ORDER    -> enabled  <button type="submit">(Item is randomly selected) I agree + preorder</button>
+   *   COMING SOON  -> disabled <button type="submit" disabled>Available soon</button>
+   *   OUT OF STOCK -> disabled <button type="submit" disabled>Out of stock</button>
+   * The button sits in the same flex row as the quantity <input name="quantity">.
+   */
+  const BuyState = {
+    IN_STOCK: 'IN_STOCK',
+    PRE_ORDER: 'PRE_ORDER',
+    COMING_SOON: 'COMING_SOON',
+    OUT_OF_STOCK: 'OUT_OF_STOCK',
+    UNKNOWN: 'UNKNOWN'
+  };
+  const UNAVAILABLE_TEXT_RE = /(out of stock|sold out|available soon|coming soon|notify me|unavailable|no longer available)/i;
+  const COMING_SOON_TEXT_RE = /(available soon|coming soon)/i;
+  const PREORDER_TEXT_RE    = /pre-?\s?order/i;
+  const BUYABLE_TEXT_RE     = /(add to cart|add to bag|buy now|pre-?\s?order|i agree)/i;
 
-    // Fallback: look for submit buttons inside product purchase containers
-    const submitBtns = Array.from(document.querySelectorAll('button[type="submit"]:not([disabled])'));
-    return submitBtns[0] || null;
+  function normText(el) {
+    return (el?.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function isProductCardButton(btn) {
+    // Related-product / carousel cards use aria-labels like "Add to cart for <name>"
+    const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+    return /^(add to cart for|notify me for|pre-?order for)/.test(aria);
+  }
+
+  // Locates the MAIN product purchase button only (never carousels, search, newsletter forms).
+  // Works on the live document and on DOMParser documents from background polling.
+  function findMainBuyButton(root = document) {
+    const qtyInput = root.querySelector('input[name="quantity"]') || root.querySelector('input[aria-label="Quantity"]');
+    if (qtyInput) {
+      let el = qtyInput.parentElement;
+      for (let depth = 0; el && depth < 5; depth++, el = el.parentElement) {
+        const btn = el.querySelector('button[type="submit"]');
+        if (btn && !isProductCardButton(btn)) return btn;
+      }
+    }
+    const cartForm = root.querySelector('form[action*="cart" i]');
+    if (cartForm) {
+      const btn = cartForm.querySelector('button[type="submit"]');
+      if (btn && !isProductCardButton(btn)) return btn;
+    }
+    // Last resort: a submit button whose label is clearly a buy/stock label
+    return Array.from(root.querySelectorAll('button[type="submit"]')).find(b => {
+      if (isProductCardButton(b)) return false;
+      const t = normText(b);
+      return BUYABLE_TEXT_RE.test(t) || UNAVAILABLE_TEXT_RE.test(t);
+    }) || null;
+  }
+
+  function getBuyState(root = document) {
+    const btn = findMainBuyButton(root);
+    if (!btn) return { state: BuyState.UNKNOWN, btn: null, label: '' };
+
+    const label = normText(btn);
+    const disabled = btn.hasAttribute('disabled') || btn.getAttribute('aria-disabled') === 'true';
+
+    if (COMING_SOON_TEXT_RE.test(label)) return { state: BuyState.COMING_SOON, btn, label };
+    if (UNAVAILABLE_TEXT_RE.test(label) || disabled) return { state: BuyState.OUT_OF_STOCK, btn, label };
+    if (PREORDER_TEXT_RE.test(label)) return { state: BuyState.PRE_ORDER, btn, label };
+    if (BUYABLE_TEXT_RE.test(label)) return { state: BuyState.IN_STOCK, btn, label };
+    return { state: BuyState.UNKNOWN, btn, label };
+  }
+
+  function isBuyable(state) {
+    return state === BuyState.IN_STOCK || state === BuyState.PRE_ORDER;
+  }
+
+  function findAddToCartButton() {
+    const { state, btn } = getBuyState(document);
+    return isBuyable(state) ? btn : null;
+  }
+
+  /* Bot-initiated navigation: resume the sniper automatically after the page reloads.
+     Manual visits still require clicking "Start Sniper" (prevents rogue buys). */
+  const RESUME_KEY = 'tm_resume_bot';
+  function navigateAndResume(url) {
+    sessionStorage.setItem(RESUME_KEY, String(Date.now()));
+    window.location.href = url;
+  }
+  function consumeResumeFlag() {
+    const ts = parseInt(sessionStorage.getItem(RESUME_KEY) || '0');
+    sessionStorage.removeItem(RESUME_KEY);
+    return ts > 0 && (Date.now() - ts) < 120000;
   }
 
   function findQuantityControls() {
@@ -1141,7 +1217,9 @@
     GM_setValue(STORAGE_CC_NUM, document.getElementById('tm-cc-num')?.value.trim() || '');
     GM_setValue(STORAGE_CC_EXP, document.getElementById('tm-cc-exp')?.value.trim() || '');
     GM_setValue(STORAGE_CC_CVV, document.getElementById('tm-cc-cvv')?.value.trim() || '');
-    GM_setValue(STORAGE_TARGET_URL, document.getElementById('tm-target-url')?.value.trim() || '');
+    const prevTargetUrl = GM_getValue(STORAGE_TARGET_URL, '').trim();
+    const newTargetUrl = document.getElementById('tm-target-url')?.value.trim() || '';
+    GM_setValue(STORAGE_TARGET_URL, newTargetUrl);
     GM_setValue(STORAGE_TARGET_QTY, parseInt(document.getElementById('tm-target-qty')?.value) || 1);
     GM_setValue(STORAGE_POLL_MIN, parseInt(document.getElementById('tm-poll-min')?.value) || 3);
     GM_setValue(STORAGE_POLL_MAX, parseInt(document.getElementById('tm-poll-max')?.value) || 6);
@@ -1150,6 +1228,14 @@
     GM_setValue(STORAGE_MONITOR_URL, document.getElementById('tm-monitor-url')?.value.trim() || '');
     showToast('All settings saved!', 'success');
     logActivity('All settings saved to secure local storage.', 'success');
+
+    // Target changed while running: stop the monitor, load the new product page fresh, then resume.
+    if (botRunning && newTargetUrl && newTargetUrl !== prevTargetUrl) {
+      logActivity('Target URL changed. Restarting monitor on the new product page...', 'warn');
+      stopBot();
+      GM_setValue(STORAGE_AUTO, true);
+      setTimeout(() => navigateAndResume(newTargetUrl), 400);
+    }
   }
 
   function setPageBadge(type, label) {
@@ -1344,7 +1430,7 @@
       setBotState(BotState.MONITORING, 'Navigating to target');
       logActivity(`⚠️ Current page does not match target. Navigating to target URL... (attempt ${redirectCount + 1}/3)`, 'warn');
       setStatus('warn', 'Wrong Page', 'Redirecting to target product...', true);
-      window.location.href = targetUrl;
+      navigateAndResume(targetUrl);
       return;
     }
 
@@ -1358,22 +1444,34 @@
     let currentQty = (uiTargetQty > 0 ? uiTargetQty : savedTargetQty) || 1;
 
     const { input: nativeQtyInput, incBtn, decBtn } = findQuantityControls();
-    const nativeAddBtn = findAddToCartButton();
+    const pageBuy = getBuyState(document);
+    const nativeAddBtn = isBuyable(pageBuy.state) ? pageBuy.btn : null;
+
+    // React may not have rendered the purchase row yet — give it a few seconds before deciding
+    if (pageBuy.state === BuyState.UNKNOWN && buyButtonWaitTries < 12) {
+      buyButtonWaitTries++;
+      setBotState(BotState.MONITORING, 'Waiting for page');
+      botLoopTimeout = setTimeout(runBuyLoop, 500);
+      return;
+    }
+    buyButtonWaitTries = 0;
 
     if (!nativeAddBtn) {
-      // Out of stock on page — trigger dual-mode background polling
+      // Not buyable on page (Out of stock / Available soon) — trigger background polling
       const pollUrl = targetUrl || window.location.href;
       setBotState(BotState.MONITORING, 'Polling stock');
-      logActivity('Add to Cart not found. Polling stock in background...', 'warn');
-      setStatus('warn', 'Waiting for Stock', 'Silent polling active...', true);
+      logActivity(`Product state: ${pageBuy.state}${pageBuy.label ? ` ("${pageBuy.label}")` : ''}. Polling stock in background...`, 'warn');
+      setStatus('warn', 'Waiting for Stock', `${pageBuy.label || pageBuy.state} — silent polling active...`, true);
 
       checkStockInBackground(pollUrl, () => {
-        logActivity('Stock spotted! Navigating to product page...', 'success');
+        logActivity('Stock spotted! Reloading product page to buy...', 'success');
         triggerTurboMode(90);
-        window.location.href = pollUrl;
+        navigateAndResume(pollUrl);
       });
       return;
     }
+
+    logActivity(`Product is buyable: ${pageBuy.state} ("${pageBuy.label}")`, 'success');
 
     setBotState(BotState.ADJUSTING_QTY, `Target: ${currentQty}`);
     logActivity(`Found product! Setting quantity: ${currentQty}...`, 'info');
@@ -1439,7 +1537,7 @@
       }
 
       setBotState(BotState.ADDING_TO_CART);
-      logActivity('Clicking "Add to cart" button with human curve trajectory...', 'info');
+      logActivity(`Clicking "${normText(freshAddBtn)}" button with human curve trajectory...`, 'info');
       await humanClick(freshAddBtn);
 
       let verified = false;
@@ -1573,6 +1671,8 @@
     if (stockPollTimeout) clearTimeout(stockPollTimeout);
 
     let pollCount = 0;
+    let unknownPolls = 0;
+    let lastPolledState = null;
     const cleanUrl = url.split('?')[0];
 
     const doPoll = () => {
@@ -1597,12 +1697,37 @@
         onload: function (res) {
           if (!botRunning && !GM_getValue(STORAGE_AUTO, false)) return;
 
-          const html = res.responseText.toLowerCase();
-          const hasAddToCart = html.includes('add to cart');
-          const isOutOfStock = html.includes('out of stock') || html.includes('sold out') || html.includes('notify me');
+          // Rate-limited / blocked by bot protection: back off hard instead of hammering
+          if (res.status === 429 || res.status === 403) {
+            const backoff = randDelay(30000, 60000);
+            logActivity(`⚠️ Toymate returned HTTP ${res.status} (rate limited). Backing off ${Math.round(backoff / 1000)}s...`, 'error');
+            stockPollTimeout = setTimeout(doPoll, backoff);
+            return;
+          }
 
-          if (hasAddToCart && !isOutOfStock) {
-            logActivity(`🚀 FLASH RESTOCK DETECTED for ${cleanUrl}!`, 'success');
+          // Parse the HTML and check ONLY the main product purchase button (ignores carousels etc.)
+          const doc = new DOMParser().parseFromString(res.responseText || '', 'text/html');
+          const { state, label } = getBuyState(doc);
+
+          if (state !== lastPolledState) {
+            logActivity(`[POLL] Remote state: ${state}${label ? ` ("${label}")` : ''}`, isBuyable(state) ? 'success' : 'info');
+            lastPolledState = state;
+          }
+
+          // Raw HTML doesn't contain the purchase row (client-rendered) — fall back to a real page reload
+          if (state === BuyState.UNKNOWN) {
+            unknownPolls++;
+            if (unknownPolls >= 5) {
+              logActivity('Could not read stock from background request. Reloading the product page instead...', 'warn');
+              navigateAndResume(cleanUrl);
+              return;
+            }
+          } else {
+            unknownPolls = 0;
+          }
+
+          if (isBuyable(state)) {
+            logActivity(`🚀 FLASH RESTOCK DETECTED for ${cleanUrl}! (${label})`, 'success');
             setStatus('success', 'In Stock!', 'Executing purchase...', true);
             showToast('🎉 In Stock! Sniping now!', 'success', 8000);
             playSound('stock');
@@ -1855,21 +1980,22 @@
       const btn = card?.querySelector('button');
       const btnAriaLabel = (btn?.getAttribute('aria-label') || '').toLowerCase();
       const btnText = (btn?.textContent || '').trim().toLowerCase();
-      const isOutOfStock = btnText.includes('out of stock') || btnText.includes('notify') || btnAriaLabel.includes('notify') || btnAriaLabel.includes('out of stock') || (card?.textContent || '').toLowerCase().includes('out of stock');
+      const btnDisabled = !!btn && (btn.hasAttribute('disabled') || btn.getAttribute('aria-disabled') === 'true');
+      const isOutOfStock = btnDisabled || UNAVAILABLE_TEXT_RE.test(btnText) || UNAVAILABLE_TEXT_RE.test(btnAriaLabel) || (card?.textContent || '').toLowerCase().includes('out of stock');
       results.push({ pid, productName, productLink, isOutOfStock });
     });
     if (results.length === 0) {
       doc.querySelectorAll('button[aria-label]').forEach(btn => {
         const ariaLabel = btn.getAttribute('aria-label') || '';
-        const isAddToCart = ariaLabel.toLowerCase().includes('add to cart');
-        const isNotify = ariaLabel.toLowerCase().includes('notify') || ariaLabel.toLowerCase().includes('out of stock');
+        const isAddToCart = BUYABLE_TEXT_RE.test(ariaLabel);
+        const isNotify = UNAVAILABLE_TEXT_RE.test(ariaLabel) || btn.hasAttribute('disabled');
         if (!isAddToCart && !isNotify) return;
         const card = btn.closest('li, article, [class*="product"]') || btn.parentElement?.parentElement;
         const anchor = card?.querySelector('a[href*="/"]');
         const href = anchor?.getAttribute('href') || '';
         const productLink = href.startsWith('http') ? href : (href ? new URL(href, baseUrl).href : baseUrl);
         const pid = anchor?.id || ariaLabel.replace(/[^a-z0-9]/gi, '').substring(0, 20);
-        const productName = ariaLabel.replace(/^(add to cart for|notify me for)\s*/i, '').trim() || `Product via btn`;
+        const productName = ariaLabel.replace(/^(add to cart for|notify me for|pre-?\s?order for)\s*/i, '').trim() || `Product via btn`;
         results.push({ pid, productName, productLink, isOutOfStock: isNotify });
       });
     }
@@ -2019,9 +2145,14 @@
     } else {
       setTimeout(() => {
         checkProductPageDetails();
-        // Do NOT auto-start; user must click "Start Sniper" each session to prevent rogue buys
+        // Do NOT auto-start on manual visits; user must click "Start Sniper" to prevent rogue buys.
+        // Exception: resume when the bot itself navigated here (stock detected / redirect / target change).
         const savedTarget = GM_getValue(STORAGE_TARGET_URL, '').trim();
-        if (savedTarget) {
+        if (savedTarget && consumeResumeFlag() && GM_getValue(STORAGE_AUTO, false)) {
+          buildPanel();
+          logActivity('Resuming sniper after bot-initiated navigation...', 'info');
+          startBot();
+        } else if (savedTarget) {
           setStatus('info', 'Ready to Snipe', `Target: ${savedTarget.substring(0,40)}...`);
           logActivity(`Target configured: ${savedTarget}. Click "Start Sniper" to arm.`, 'info');
         } else {
